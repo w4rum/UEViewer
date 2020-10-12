@@ -26,8 +26,11 @@ bool LoadWholePackage(UnPackage* Package, IProgressCallback* progress)
 	UObject::BeginLoad();
 	for (int idx = 0; idx < Package->Summary.ExportCount; idx++)
 	{
-		if (!IsKnownClass(Package->GetObjectName(Package->GetExport(idx).ClassIndex)))
-			continue;
+		if (!IsKnownClass(Package->GetObjectName(Package->GetExport(idx).ClassIndex))) {
+            const char* cn = Package->GetObjectName(Package->GetExport(idx).ClassIndex);
+            appPrintf("Ignoring unknown class %s\n", cn);
+            continue;
+		}
 		if (progress && !progress->Tick()) return false;
 		Package->CreateExport(idx);
 	}

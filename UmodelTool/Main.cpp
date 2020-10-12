@@ -42,6 +42,9 @@
 //#define SHOW_HIDDEN_SWITCHES		1
 //#define DUMP_MEM_ON_EXIT			1
 
+#ifdef SQUAD
+#include "GameSpecific/UnSquad.h"
+#endif
 
 // Note: declaring this variable in global scope will have side effect that
 // GSettings.Reset() will be called before main() executed.
@@ -69,6 +72,9 @@ BEGIN_CLASS_TABLE
 #endif
 #if SPLINTER_CELL
 	REGISTER_MATERIAL_CLASSES_SCELL
+#endif
+#if SQUAD
+    REGISTER_SQUAD_CLASSES
 #endif
 #if UNREAL3
 	REGISTER_MATERIAL_CLASSES_U3		//!! needed for Bioshock 2 too
@@ -1081,7 +1087,17 @@ int main(int argc, const char **argv)
 			{
 				appPrintf("\n%s\n", *Package->GetFilename());
 			}
+            // dump import name table
+            appPrintf("--- ImportTable");
+            for (int i = 0; i < Package->Summary.ImportCount; i++)
+            {
+                const FObjectImport &Imp = Package->GetImport(i);
+                const char *PackageName = Package->GetObjectPackageName(Imp.PackageIndex);
+                appPrintf("%d = %s\n", i, *Imp.ObjectName);
+            }
+
 			// dump package exports table
+			appPrintf("--- ExportTable");
 			for (int i = 0; i < Package->Summary.ExportCount; i++)
 			{
 				const FObjectExport &Exp = Package->ExportTable[i];

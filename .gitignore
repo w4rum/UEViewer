@@ -44,3 +44,9 @@ Tools/UITest/vs/Release/
 # ooz library
 libs/oodle/*.h
 libs/oodle/*.cpp
+
+cmake-build-debug
+.idea
+
+umodel
+umodel.exe

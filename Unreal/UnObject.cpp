@@ -170,7 +170,7 @@ void UObject::EndLoad()
 		PROFILE_LABEL(Obj->GetClassName());
 
 		Package->SetupReader(Obj->PackageIndex);
-		appPrintf("Loading %s %s from package %s\n", Obj->GetClassName(), Obj->Name, *Package->GetFilename());
+		//appPrintf("Loading %s %s from package %s\n", Obj->GetClassName(), Obj->Name, *Package->GetFilename());
 		// setup NotifyInfo to describe object
 		appSetNotifyHeader("Loading object %s'%s.%s'", Obj->GetClassName(), Package->Name, Obj->Name);
 #if PROFILE_LOADING
@@ -355,6 +355,7 @@ static const struct
 	F(Int16Property),
 	F(Int8Property),
 	F(SetProperty),
+	F(TextProperty),
 #endif
 #undef F
 };
@@ -1106,6 +1107,18 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 
 		int StopPos = Ar.Tell() + Tag.DataSize;	// for verification
 
+		// remove spaces from tags and stop at first underscore
+		char buf[2000] = {0};
+		int i = 0;
+		int j = 0;
+		while (Tag.Name[i] != 0 && Tag.Name[i] != '_') {
+		    if (Tag.Name[i] != ' ') {
+                buf[j] = Tag.Name[i];
+                j++;
+		    }
+		    i++;
+		}
+		Tag.Name = buf;
 		const CPropInfo *Prop = FindProperty(Tag.Name);
 		if (!Prop || !Prop->TypeName)	// Prop->TypeName==NULL when declared with PROP_DROP() macro
 		{
@@ -1385,7 +1398,18 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 			break;
 
 		case NAME_MapProperty:
-			appError("Map property not implemented");
+			//appError("Map property not implemented");
+            for (int i = 0; i < 5; i++) {
+                byte ignore;
+                Ar << ignore;
+            }
+            {
+                FString package;
+                FString key;
+                Ar << package;
+                Ar << key;
+                Ar << PROP(FString);
+            }
 			break;
 
 		case NAME_FixedArrayProperty:

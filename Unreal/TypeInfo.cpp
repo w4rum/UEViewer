@@ -344,10 +344,10 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 			// formatting of property start
 			if (IsArray)
 			{
-				PD->PrintName("[%d]", PropCount);
+				//PD->PrintName("[%d]", PropCount);
 				if (!PropCount)
 				{
-					PD->PrintValue("{}");
+					PD->PrintValue("[]");
 					continue;
 				}
 			}
@@ -360,7 +360,7 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 				{
 					// create nested CPropDump
 					PD2 = new (PD->Nested) CPropDump;
-					PD2->PrintName("%s[%d]", Prop->Name, ArrayIndex);
+					PD2->PrintName("%i", ArrayIndex);
 					PD2->bIsArrayItem = true;
 				}
 
@@ -379,7 +379,7 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 				PROCESS(byte,     "%d", PROP(byte));
 				PROCESS(int,      "%d", PROP(int));
 				PROCESS(bool,     "%s", PROP(bool) ? "true" : "false");
-				PROCESS(float,    "%g", PROP(float));
+				PROCESS(float,    "%.12f", PROP(float));
 #if 1
 				if (IS(UObject*))
 				{
@@ -388,7 +388,25 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 					{
 						char ObjName[256];
 						obj->GetFullName(ARRAY_ARG(ObjName));
-						PD2->PrintValue("%s'%s'", obj->GetClassName(), ObjName);
+                        char OuterObjName[256];
+                        if (obj->Outer != nullptr) {
+                            obj->Outer->GetFullName(ARRAY_ARG(OuterObjName));
+						} else {
+                            strcpy(OuterObjName, "None");
+                        }
+						//PD2->PrintValue("%s'%s'", obj->GetClassName(), ObjName);
+                        const CTypeInfo *ClassType = FindClassType(obj->GetClassName());
+                        CPropDump *PDobj = new (PD->Nested) CPropDump;
+                        PDobj->PrintName("%s", ObjName, OuterObjName);
+
+                        CPropDump *PDclass = new (PD->Nested) CPropDump;
+                        PDclass->PrintName("ClassName");
+                        PDclass->PrintValue("%s", obj->GetClassName());
+
+                        CPropDump *PDobjOuter = new (PDobj->Nested) CPropDump;
+                        PDobjOuter->PrintName("OuterName");
+                        PDobjOuter->PrintValue("%s", OuterObjName);
+						CollectProps(ClassType, obj, *PDobj);
 					}
 					else
 					{
@@ -439,7 +457,7 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 		bool bNamePrinted = false;
 		if (!Dump.Name.IsEmpty())
 		{
-			Ar.Printf("%s =", *Dump.Name);	// root CPropDump will not have a name
+			Ar.Printf("%s:", *Dump.Name);	// root CPropDump will not have a name
 			bNamePrinted = true;
 		}
 
@@ -467,7 +485,7 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 			}
 		}
 
-		if (IsSimple)
+		if (IsSimple && false)
 		{
 			// single-line value display
 			Ar.Printf(" { ");
@@ -495,8 +513,8 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 			if (bNamePrinted) Ar.Printf("\n");
 			if (!TopLevel)
 			{
-				PrintIndent(Ar, Indent);
-				Ar.Printf("{\n");
+				//PrintIndent(Ar, Indent);
+				//Ar.Printf("{\n");
 			}
 
 			for (const CPropDump &Prop : Dump.Nested)
@@ -507,15 +525,15 @@ static void PrintProps(const CPropDump &Dump, FArchive& Ar, int Indent, bool Top
 
 			if (!TopLevel)
 			{
-				PrintIndent(Ar, Indent);
-				Ar.Printf("}\n");
+				//PrintIndent(Ar, Indent);
+				//Ar.Printf("}\n");
 			}
 		}
 	}
 	else
 	{
 		// single property
-		if (!Dump.Name.IsEmpty()) Ar.Printf("%s = %s\n", *Dump.Name, *Dump.Value);
+		if (!Dump.Name.IsEmpty()) Ar.Printf("%s: %s\n", *Dump.Name, *Dump.Value);
 	}
 }
 

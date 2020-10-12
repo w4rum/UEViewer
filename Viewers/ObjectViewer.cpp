@@ -25,9 +25,15 @@ void CObjectViewer::Dump()
 {
 	if (Object)
 	{
-		appPrintf("\nObject info:\n============\n");
-		appPrintf("ClassName: %s ObjectName: %s\n", Object->GetClassName(), Object->Name);
+		//appPrintf("\nObject info:\n============\n");
+		//appPrintf("ClassName: %s ObjectName: %s\n", Object->GetClassName(), Object->Name);
+		char buf[2000] = {0};
+		Object->GetFullName(buf, 2000);
+		appPrintf("---\n");
+		appPrintf("%s:\n", buf);
+		appPrintf("    ClassName: %s\n", Object->GetClassName());
 		Object->GetTypeinfo()->DumpProps(Object);
+		appPrintf("\n");
 	}
 }
 

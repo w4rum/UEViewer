@@ -1,3 +1,9 @@
+This is a fork of the original project.
+The following changes have been made as part of the [Squad Lanes project](https://github.com/w4rum/squadlanes):
+
+- Added support for a few `UObjects`, `UComponents`, and `UActors` used in Squad maps.
+- Changed `-dump` to print in YAML format. Some additional fields (`ClassName`, `OuterName`) have been hacked into the `-dump` function, likely making it unusable for other purposes.
+
 UE Viewer
 =========
 

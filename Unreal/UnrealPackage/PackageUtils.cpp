@@ -224,7 +224,7 @@ static void ScanPackageExports(UnPackage* package, CGameFileInfo* file)
 {
 	for (int idx = 0; idx < package->Summary.ExportCount; idx++)
 	{
-		const char* ObjectClass = package->GetObjectName(package->GetExport(idx).ClassIndex);
+		const char* ObjectClass = package->GetClassNameFor(package->GetExport(idx));
 
 		if (!stricmp(ObjectClass, "SkeletalMesh") || !stricmp(ObjectClass, "DestructibleMesh"))
 			file->NumSkeletalMeshes++;
@@ -282,6 +282,9 @@ bool ScanContent(const TArray<const CGameFileInfo*>& Packages, IProgressCallback
 		{
 			UnPackage* package = UnPackage::LoadPackage(file, /*silent=*/ true);	// should always return non-NULL
 			if (!package) continue;		// should not happen
+			// Don't keep the package's reader open
+			package->CloseReader();
+
 			ScanPackageExports(package, file);
 		#if 0
 			// this code is disabled: it works, however we're going to use ScanContent not just to get objects counts,
@@ -324,7 +327,7 @@ void CollectPackageStats(const TArray<UnPackage*> &Packages, TArray<ClassStats>&
 		for (int j = 0; j < pkg->Summary.ExportCount; j++)
 		{
 			const FObjectExport &Exp = pkg->ExportTable[j];
-			const char* className = pkg->GetObjectName(Exp.ClassIndex);
+			const char* className = pkg->GetClassNameFor(Exp);
 			ClassStats* found = NULL;
 			for (int k = 0; k < Stats.Num(); k++)
 				if (Stats[k].Name == className)

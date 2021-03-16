@@ -1,6 +1,12 @@
 #ifndef __TYPEINFO_H__
 #define __TYPEINFO_H__
 
+namespace TypeinfoDetail
+{
+	// Default value for StaticSerialize(), could be changed with USE_NATIVE_SERIALIZER macro
+	constexpr void (*StaticSerialize)(FArchive&, void*) = NULL;
+};
+
 // Comparing PropLevel with Super::PropLevel to detect whether we have property
 // table in current class or not
 #define DECLARE_BASE(Class,Base)				\
@@ -11,6 +17,7 @@
 		{ new(Mem) ThisClass; }					\
 		static const CTypeInfo* StaticGetTypeinfo() \
 		{										\
+			using namespace TypeinfoDetail;		\
 			int numProps = 0;					\
 			const CPropInfo *props = NULL;		\
 			if ((int)PropLevel != (int)Super::PropLevel) \
@@ -20,7 +27,8 @@
 				Super::StaticGetTypeinfo(),		\
 				sizeof(ThisClass),				\
 				props, numProps,				\
-				InternalConstructor				\
+				InternalConstructor,			\
+				StaticSerialize					\
 			);									\
 			return &type;						\
 		}
@@ -53,33 +61,69 @@
 			return Ar << *(UObject**)&Res;		\
 		}
 
+// UE3 and UE4 has a possibility to use native serializer for a struct.
+// In UE4 it is declared with ...
+// The serializer is instantiated in UScriptStruct::TCppStructOps::Serialize()
+// when TStructOpsTypeTraits<CPPSTRUCT>::WithSerializer is true.
+//todo: use native serializer for FVector, FGuid etc, clean up UnObject.cpp from explicit handling of these structs
+#define USE_NATIVE_SERIALIZER					\
+		static void StaticSerialize(FArchive& Ar, void* Data) \
+		{										\
+			Ar << *(ThisClass*)Data;			\
+		}
 
 struct CPropInfo
 {
-	const char	   *Name;		// field name
-	const char	   *TypeName;	// name of the field type
-	uint16			Offset;		// offset of this field from the class start
-	int16			Count;		// number of array items
+	// Field name
+	const char*	 	Name;
+	// Name of the field type
+	const char*		TypeName;
+	// Offset of this field from the class start
+	uint16			Offset;
+	/* Number of array items:
+	 *  1  for ordinary property
+	 *  2+ for static arrays (Type Prop[COUNT])
+	 * -1  for TArray (TArray<Type>)
+	 *  0  for PROP_DROP - not linked to a read property
+	 */
+	int16			Count;
+
+	constexpr CPropInfo(const char* InName, const char* InTypeName, uint16 InOffset, int16 InCount)
+	: Name(InName)
+	, TypeName(InTypeName)
+	, Offset(InOffset)
+	, Count(InCount)
+	{}
+
+	// Constructor for PROP_DROP
+	constexpr CPropInfo(const char* InName, const char* InTypeName = NULL)
+	: Name(InName)
+	, TypeName(InTypeName)
+	, Offset(0)
+	, Count(0)
+	{}
 };
 
 
 struct CTypeInfo
 {
-	const char		*Name;
-	const CTypeInfo *Parent;
+	const char*		Name;
+	const CTypeInfo* Parent;
 	int				SizeOf;
-	const CPropInfo *Props;
+	const CPropInfo* Props;
 	int				NumProps;
 	void (*Constructor)(void*);
+	void (*NativeSerializer)(FArchive&, void*);
 	// methods
 	constexpr FORCEINLINE CTypeInfo(const char *AName, const CTypeInfo *AParent, int DataSize,
-					 const CPropInfo *AProps, int PropCount, void (*AConstructor)(void*))
+					 const CPropInfo *AProps, int PropCount, void (*AConstructor)(void*), void (*ASerializer)(FArchive&, void*))
 	:	Name(AName)
 	,	Parent(AParent)
 	,	SizeOf(DataSize)
 	,	Props(AProps)
 	,	NumProps(PropCount)
 	,	Constructor(AConstructor)
+	,	NativeSerializer(ASerializer)
 	{}
 	inline bool IsClass() const
 	{
@@ -90,9 +134,21 @@ struct CTypeInfo
 	static void RemapProp(const char *Class, const char *OldName, const char *NewName);
 
 	// Serialize Unreal engine UObject property block
-	void SerializeUnrealProps(FArchive &Ar, void *ObjectData) const;
+	void SerializeUnrealProps(FArchive& Ar, void* ObjectData) const;
+
+#if UNREAL4
+	void SerializeUnversionedProperties4(FArchive& Ar, void* ObjectData) const;
+	const char* FindUnversionedProp(int PropIndex, int& OutArrayIndex) const;
+#endif
+
+	void ReadUnrealProperty(FArchive& Ar, struct FPropertyTag& Tag, void* ObjectData, int PropTagPos) const;
+
+#if BATMAN
+	void SerializeBatmanProps(FArchive& Ar, void* ObjectData) const;
+#endif
 
 	void DumpProps(const void *Data) const;
+	void DumpProps(const void* Data, void (*Callback)(const char*)) const;
 	void SaveProps(const void *Data, FArchive& Ar) const;
 	bool LoadProps(void *Data, FArchive& Ar) const;
 };
@@ -114,12 +170,37 @@ struct CNullType
 	}
 };
 
+// Constants for declaring property types
+namespace PropType
+{
+	constexpr const char* Bool = "bool";
+	constexpr const char* Int = "int";
+	constexpr const char* Byte = "byte";
+	constexpr const char* Float = "float";
+	constexpr const char* FName = "FName";
+	constexpr const char* UObject = "UObject*";
+	constexpr const char* FString = "FString";
+	constexpr const char* FVector = "FVector";
+	constexpr const char* FRotator = "FRotator";
+	constexpr const char* FColor = "FColor";
+	constexpr const char* FVector4 = "FVector4"; // FVector4, FQuat, FGuid etc
+}
 
-#define _PROP_BASE(Field,Type)	{ #Field, #Type, FIELD2OFS(ThisClass, Field), sizeof(((ThisClass*)NULL)->Field) / sizeof(Type) },
+#define _PROP_BASE(Field,TypeName,BaseType)	{ #Field, TypeName, FIELD2OFS(ThisClass, Field), sizeof(ThisClass::Field) / sizeof(BaseType) },
+
 // PROP_ARRAY is used for TArray. For static array (type[N]) use declaration for 'type'.
-#define PROP_ARRAY(Field,Type)	{ #Field, #Type, FIELD2OFS(ThisClass, Field), -1 },
-#define PROP_STRUC(Field,Type)	_PROP_BASE(Field, Type)
-#define PROP_DROP(Field)		{ #Field, NULL, 0, 0 },		// signal property, which should be dropped
+#define PROP_ARRAY(Field,TypeName)			{ #Field, TypeName, FIELD2OFS(ThisClass, Field), -1 }, //todo: should use PropType constants here!
+// Structure property aggregated into the class
+#define PROP_STRUC(Field,Type)				_PROP_BASE(Field, #Type, Type)
+// Register a property which should be ignored
+#if _MSC_VER
+#define PROP_DROP(Field, ...)				CPropInfo(#Field, __VA_ARGS__),
+#else
+// gcc doesn't like  empty __VA_ARGS__
+#define PROP_DROP(Field, ...)				CPropInfo(#Field __VA_OPT__(,) __VA_ARGS__),
+#endif
+// Register another name for the same property
+#define PROP_ALIAS(Name,Alias)  			{ #Alias, ">" #Name, 0, 0 },
 
 
 // BEGIN_PROP_TABLE/END_PROP_TABLE declares property table inside class declaration
@@ -129,24 +210,25 @@ struct CNullType
 	{											\
 		static const CPropInfo props[] =		\
 		{
-// simple types
+
+// Simple types
 // note: has special PROP_ENUM(), which is the same as PROP_BYTE(), but when using
 // PROP_BYTE for enumeration value, _PROP_BASE macro will set 'Count' field of
 // CPropInfo to 4 instead of 1 (enumeration values are serialized as byte, but
 // compiler report it as 4-byte field).
-#define PROP_ENUM(Field)		{ #Field, "byte",   FIELD2OFS(ThisClass, Field), 1 },
+#define PROP_ENUM(Field)		{ #Field, PropType::Byte, FIELD2OFS(ThisClass, Field), 1 },
 #define PROP_ENUM2(Field,Type)	{ #Field, "#"#Type, FIELD2OFS(ThisClass, Field), 1 },
-#define PROP_BYTE(Field)		_PROP_BASE(Field, byte     )
-#define PROP_INT(Field)			_PROP_BASE(Field, int      )
-#define PROP_BOOL(Field)		_PROP_BASE(Field, bool     )
-#define PROP_FLOAT(Field)		_PROP_BASE(Field, float    )
-#define PROP_NAME(Field)		_PROP_BASE(Field, FName    )
-#define PROP_STRING(Field)		_PROP_BASE(Field, FString  )
-#define PROP_OBJ(Field)			_PROP_BASE(Field, UObject* )
-// structure types; note: structure names corresponds to F<StrucName> C++ struc
-#define PROP_VECTOR(Field)		_PROP_BASE(Field, FVector  )
-#define PROP_ROTATOR(Field)		_PROP_BASE(Field, FRotator )
-#define PROP_COLOR(Field)		_PROP_BASE(Field, FColor   )
+#define PROP_BYTE(Field)		_PROP_BASE(Field, PropType::Byte, byte )
+#define PROP_INT(Field)			_PROP_BASE(Field, PropType::Int, int32  )
+#define PROP_BOOL(Field)		_PROP_BASE(Field, PropType::Bool, bool )
+#define PROP_FLOAT(Field)		_PROP_BASE(Field, PropType::Float, float)
+#define PROP_NAME(Field)		_PROP_BASE(Field, PropType::FName, FName)
+#define PROP_STRING(Field)		_PROP_BASE(Field, PropType::FString, FString)
+#define PROP_OBJ(Field)			_PROP_BASE(Field, PropType::UObject, UObject*)
+// Structure types; note: structure names corresponds to F<StrucName> C++ struc
+#define PROP_VECTOR(Field)		_PROP_BASE(Field, PropType::FVector, FVector)
+#define PROP_ROTATOR(Field)		_PROP_BASE(Field, PropType::FRotator, FRotator)
+#define PROP_COLOR(Field)		_PROP_BASE(Field, PropType::FColor, FColor)
 
 #define END_PROP_TABLE							\
 		};										\
@@ -154,8 +236,13 @@ struct CNullType
 		return props;							\
 	}
 
+#define DUMMY_PROP_TABLE						\
+	BEGIN_PROP_TABLE							\
+		PROP_DROP(Dummy)						\
+	END_PROP_TABLE
+
 #if DECLARE_VIEWER_PROPS
-#define VPROP_ARRAY_COUNT(Field,Name)	{ #Name, "int", FIELD2OFS(ThisClass, Field) + ARRAY_COUNT_FIELD_OFFSET, 1 },
+#define VPROP_ARRAY_COUNT(Field,Name)	{ #Name, PropType::Int, FIELD2OFS(ThisClass, Field) + ARRAY_COUNT_FIELD_OFFSET, 1 },
 #endif // DECLARE_VIEWER_PROPS
 
 // Mix of BEGIN_PROP_TABLE and DECLARE_BASE
@@ -163,12 +250,27 @@ struct CNullType
 #define BEGIN_PROP_TABLE_EXTERNAL(Class)		\
 static FORCEINLINE const CTypeInfo* Class##_StaticGetTypeinfo() \
 {												\
+	using namespace TypeinfoDetail;				\
 	static const char ClassName[] = #Class;		\
 	typedef Class ThisClass;					\
 	static const CPropInfo props[] =			\
 	{
 
+#define BEGIN_PROP_TABLE_EXTERNAL_WITH_NATIVE_SERIALIZER(Class)	\
+static FORCEINLINE const CTypeInfo* Class##_StaticGetTypeinfo() \
+{												\
+	static const char ClassName[] = #Class;		\
+	typedef Class ThisClass;					\
+	auto StaticSerialize=[](FArchive& Ar, void* Data) \
+	{											\
+		Ar << *(ThisClass*)Data;				\
+	};											\
+	static const CPropInfo props[] =			\
+	{
+
+
 // Mix of END_PROP_TABLE and DECLARE_BASE
+//todo: there's no InternalConstructor for this type of object declaration?
 #define END_PROP_TABLE_EXTERNAL					\
 	};											\
 	static const CTypeInfo type(				\
@@ -176,7 +278,8 @@ static FORCEINLINE const CTypeInfo* Class##_StaticGetTypeinfo() \
 		NULL,									\
 		sizeof(ThisClass),						\
 		props, ARRAY_COUNT(props),				\
-		NULL									\
+		NULL,									\
+		StaticSerialize							\
 	);											\
 	return &type;								\
 }

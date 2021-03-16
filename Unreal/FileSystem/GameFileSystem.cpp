@@ -4,6 +4,7 @@
 
 #include "UnArchiveObb.h"
 #include "UnArchivePak.h"
+#include "IOStoreFileSystem.h"
 
 #include "Parallel.h"
 
@@ -131,7 +132,7 @@ static const char *SkipExtensions[] =
 
 #if UNREAL4
 
-static bool GIsUE4PackageMode = false;
+static bool GIsUE4Pak = false;
 
 static const char* UE4PackageExtensions[] =
 {
@@ -376,27 +377,34 @@ static void RegisterGameFile(const char* FullName, int64 FileSize = -1)
 	}
 #endif // SUPPORT_ANDROID
 #if UNREAL4
+	FPakVFS* PakVfs = NULL;
 	if (!stricmp(ext, "pak"))
 	{
 		reader = new FFileReader(FullName);
 		if (!reader) return;
 		reader->Game = GAME_UE4_BASE;
-		vfs = new FPakVFS(FullName);
-		GIsUE4PackageMode = true; // ignore non-UE4 extensions for speedup file registration
+		PakVfs = new FPakVFS(FullName);
+		vfs = PakVfs;
+		GIsUE4Pak = true; // ignore non-UE4 extensions for speedup file registration
+	}
+	else if (!stricmp(ext, "utok") || !stricmp(ext, "ucas"))
+	{
+		// Processed with .pak file, so ignore these files
 	}
 #endif // UNREAL4
-	//!! note: VFS pointer is not stored in any global list, and not released upon program exit
+
+	// Note: VFS pointer is not stored in any global list, and not released at program exit
 	if (vfs)
 	{
 		assert(reader);
-		// read VF directory
+		// read VFS directory
 		FString error;
 		if (!vfs->AttachReader(reader, error))
 		{
 #if UNREAL4
-			// Reset GIsUE4PackageMode back in a case if .pak file appeared in directory
+			// Reset GIsUE4Pak back in a case if .pak file appeared in directory
 			// by accident.
-			GIsUE4PackageMode = false;
+			GIsUE4Pak = false;
 #endif
 			// something goes wrong
 			if (error.Len())
@@ -412,7 +420,60 @@ static void RegisterGameFile(const char* FullName, int64 FileSize = -1)
 			return;
 		}
 #if UNREAL4
-		GIsUE4PackageMode = false;
+		if (GIsUE4Pak)
+		{
+			// Get the pak's encryption key, which is only assigned after vfs->AttachReader()
+			assert(PakVfs);
+			FString PakEncryptionKey = PakVfs->GetPakEncryptionKey();
+
+			// Check for presense of IOStore file system for this pak
+			guard(TokArchive);
+			char Path[MAX_PACKAGE_PATH];
+			appStrncpyz(Path, FullName, ARRAY_COUNT(Path));
+			char* PathExt = Path + (ext - FullName);
+			strcpy(PathExt, "utoc");
+			FILE* tocFile = fopen(Path, "rb");
+			if (tocFile)
+			{
+				fclose(tocFile);
+
+				static bool bGlobalChecked = false;
+				if (!bGlobalChecked)
+				{
+					bGlobalChecked = true;
+					char GlobalPath[MAX_PACKAGE_PATH];
+					strcpy(GlobalPath, Path);
+					char* s = strrchr(GlobalPath, '/');
+					if (s)
+						s++;
+					else
+						s = GlobalPath;
+					strcpy(s, "global.utoc");
+					FIOStoreFileSystem::LoadGlobalContainer(GlobalPath);
+				}
+
+				FIOStoreFileSystem* iosVfs = new FIOStoreFileSystem(Path);
+				iosVfs->PakEncryptionKey = PakEncryptionKey;
+				FArchive* tocReader = new FFileReader(Path);
+				tocReader->Game = GAME_UE4_BASE;
+
+				// Scan contents of IOStore container
+				FString error;
+				if (!iosVfs->AttachReader(tocReader, error))
+				{
+					if (error.Len())
+					{
+						appPrintf("%s\n", *error);
+					}
+					delete iosVfs;
+					delete tocReader;
+				}
+			}
+			unguard;
+
+			// Reset GIsUE4Pak
+			GIsUE4Pak = false;
+		}
 #endif
 	}
 	else
@@ -493,7 +554,7 @@ CGameFileInfo* CGameFileInfo::Register(FVirtualFileSystem* parentVfs, const CReg
 	// to know if file is a package or not. Note: this will also make pak loading a but faster.
 	bool IsPackage = false;
 #if UNREAL4
-	if (GIsUE4PackageMode)
+	if (GIsUE4Pak)
 	{
 		// Faster case for UE4 files - it has small list of extensions
 		IsPackage = FindExtension(ext, ARRAY_ARG(UE4PackageExtensions));
@@ -560,7 +621,7 @@ CGameFileInfo* CGameFileInfo::Register(FVirtualFileSystem* parentVfs, const CReg
 
 	// Create CGameFileInfo entry
 	CGameFileInfo* info = AllocFileInfo();
-	info->IsPackage = IsPackage;
+	info->Flags = RegisterInfo.Flags | (IsPackage ? CGameFileInfo::GFI_Package : 0);
 	info->FileSystem = parentVfs;
 	info->IndexInVfs = RegisterInfo.IndexInArchive;
 	info->ShortFilename = appStrdupPool(ShortFilename);
@@ -569,10 +630,10 @@ CGameFileInfo* CGameFileInfo::Register(FVirtualFileSystem* parentVfs, const CReg
 	info->Size = RegisterInfo.Size;
 	info->SizeInKb = (info->Size + 512) / 1024;
 
-	if (info->Size < 16) info->IsPackage = false;
+	if (info->Size < 16) info->Flags &= ~CGameFileInfo::GFI_Package;
 
 #if UNREAL3
-	if (info->IsPackage && (strnicmp(info->ShortFilename, "startup", 7) == 0))
+	if (info->IsPackage() && (strnicmp(info->ShortFilename, "startup", 7) == 0))
 	{
 		// Register a startup package
 		// possible name variants:
@@ -710,10 +771,10 @@ static bool ScanGameDirectory(const char *dir, bool recurse)
 	// Register files in sorted order - should be done for pak files, so patches will work.
 	Files.Sort([](const FileInfo& p1, const FileInfo& p2) -> int
 		{
-			return stricmp(*p1.Filename, *p2.Filename) > 0;
+			return stricmp(*p1.Filename, *p2.Filename);
 		});
 
-	for (const FileInfo& File :  Files)
+	for (const FileInfo& File : Files)
 	{
 		appSprintf(ARRAY_ARG(Path), "%s/%s", dir, *File.Filename);
 		RegisterGameFile(Path, File.Size);
@@ -754,14 +815,14 @@ void appSetRootDirectory(const char *dir, bool recurse)
 	}
 #endif // GEARS4
 
-	appPrintf("Found %d game files (%d skipped) in %d folders at path \"%s\"\n", GameFiles.Num(), GNumForeignFiles, GameFolders.Num() - 1, dir);
+	appPrintf("Found %d game files (%d skipped) in %d folders at path \"%s\"\n", GameFiles.Num(), GNumForeignFiles, GameFolders.Num() ? GameFolders.Num()-1 : 0, dir);
 
 #if UNREAL4
 	// Count sizes of additional files. Should process .uexp and .ubulk files, register their information for .uasset.
 	ParallelFor(GameFiles.Num(), [](int index)
 		{
 			CGameFileInfo* info = GameFiles[index];
-			if (info->IsPackage)
+			if (info->IsPackage())
 			{
 				// Find all files with the same path/name but different extension
 				TStaticArray<const CGameFileInfo*, 32> otherFiles;
@@ -1014,7 +1075,7 @@ const CGameFileInfo* CGameFileInfo::Find(const char *Filename, int GameFolder)
 		else
 		{
 			// No extension has been provided, so we're looking only for package files
-			if (!info->IsPackage) continue;
+			if (!info->IsPackage()) continue;
 		}
 
 		// Verify the filename without extension
@@ -1297,7 +1358,7 @@ void appEnumGameFilesWorker(EnumGameFilesCallback_t Callback, const char *Ext, v
 		if (!Ext)
 		{
 			// enumerate packages
-			if (!info->IsPackage) continue;
+			if (!info->IsPackage()) continue;
 		}
 		else
 		{

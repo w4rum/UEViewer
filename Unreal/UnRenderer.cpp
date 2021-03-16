@@ -428,7 +428,7 @@ static bool UploadCompressedTex(UUnrealMaterial* Tex, GLenum target, GLenum targ
 	case TPF_BC5:
 		if (!GL_SUPPORT(QGL_ARB_TEXTURE_COMPRESSION_RGTC)) return false;
 		format = GL_COMPRESSED_RG_RGTC2;
-		Tex->NormalUnpackExpr = "normal.z = sqrt(1.0 - normal.x * normal.x - normal.y * normal.y);";
+		Tex->NormalUnpackExpr = "normal.z = sqrt(max(1.0 - normal.x * normal.x - normal.y * normal.y, 0.0));";
 		break;
 	case TPF_BC6H:
 		if (!GL_SUPPORT(QGL_ARB_TEXTURE_COMPRESSION_BPTC)) return false;
@@ -703,8 +703,10 @@ void GL_NormalmapShader(CShader &shader, CMaterialParams &Params)
 
 	// diffuse
 	glActiveTexture(GL_TEXTURE0);	// used for BindDefaultMaterial() too
+	bool bHasDiffuse = false;
 	if (Params.Diffuse && Params.Diffuse->Bind())
 	{
+		bHasDiffuse = true;
 		DBG("Diffuse  : %s", Params.Diffuse->Name);
 		ADD_DEFINE("DIFFUSE 1");
 	}
@@ -736,6 +738,22 @@ void GL_NormalmapShader(CShader &shader, CMaterialParams &Params)
 		if (Params.Specular->Bind())
 			specularExpr = va("texture2D(specTex, TexCoord).%s * vec3(specular) * 1.5", !Params.SpecularFromAlpha ? "rgb" : "a");
 	}
+	else if (Params.SpecPower)
+	{
+		//todo: refactor at shader level, make a special function for PBR material, so no multiple texture2D will be used
+		// No specular color, but has specular power - use diffuse or white color (e.g. happens with UE4)
+		glActiveTexture(GL_TEXTURE0 + I_SpecularPower);
+		if (bHasDiffuse && Params.PBRMaterial && Params.SpecPower->Bind())
+		{
+			// Ideally should analyze metalness: when metallic=1, reflect environment (white) color. When
+			// metallic=0, reflect material's diffuse color.
+			specularExpr = "(GetMaterialDiffuseColor(TexCoord).rgb * texture2D(spPowTex, TexCoord).r * 0.2) * gl_FrontMaterial.shininess";
+		}
+		else
+		{
+			specularExpr = "vec3(1.0)";
+		}
+	}
 	// specular power
 	const char *specPowerExpr = "gl_FrontMaterial.shininess";
 	if (Params.SpecPower)
@@ -743,7 +761,12 @@ void GL_NormalmapShader(CShader &shader, CMaterialParams &Params)
 		DBG("SpecPower: %s", Params.SpecPower->Name);
 		glActiveTexture(GL_TEXTURE0 + I_SpecularPower);
 		if (Params.SpecPower->Bind())
-			specPowerExpr = "texture2D(spPowTex, TexCoord).g * 100.0 + 5.0";
+		{
+			if (!Params.PBRMaterial)
+				specPowerExpr = "texture2D(spPowTex, TexCoord).g * 100.0 + 5.0";
+			else
+				specPowerExpr = "(2.0 / pow(texture2D(spPowTex, TexCoord).r, 4.0) - 2.0) * gl_FrontMaterial.shininess / 10.0";
+		}
 	}
 
 	// opacity mask
@@ -825,7 +848,7 @@ void GL_NormalmapShader(CShader &shader, CMaterialParams &Params)
 	}
 
 	//!! NOTE: Specular and SpecPower are scaled by const to improve visual; should be scaled by parameters from material
-	subst[0] = Params.Normal ? "texture2D(normTex, TexCoord).rgb * 2.0 - 1.0"  : "vec3(0.0, 0.0, 1.0)";
+	subst[0] = Params.Normal ? "texture2D(normTex, TexCoord).rgb * 2.0 - 1.0" : "vec3(0.0, 0.0, 1.0)";
 	subst[1] = specularExpr;
 	subst[2] = specPowerExpr;
 	subst[3] = opacityExpr;
@@ -1955,63 +1978,63 @@ void UMaterial3::GetParams(CMaterialParams &Params) const
 
 	int DiffWeight = 0, NormWeight = 0, SpecWeight = 0, SpecPowWeight = 0, OpWeight = 0, EmWeight = 0, CubeWeight = 0;
 #define DIFFUSE(check,weight)			\
-	if (check && weight > DiffWeight)	\
+	if (weight > DiffWeight && check)	\
 	{									\
 	/*	DrawTextLeft("D: %d > %d = %s", weight, DiffWeight, Tex->Name); */ \
 		Params.Diffuse = Tex;			\
 		DiffWeight = weight;			\
 	}
 #define NORMAL(check,weight)			\
-	if (check && weight > NormWeight)	\
+	if (weight > NormWeight && check)	\
 	{									\
 	/*	DrawTextLeft("N: %d > %d = %s", weight, NormWeight, Tex->Name); */ \
 		Params.Normal = Tex;			\
 		NormWeight = weight;			\
 	}
 #define SPECULAR(check,weight)			\
-	if (check && weight > SpecWeight)	\
+	if (weight > SpecWeight && check)	\
 	{									\
 	/*	DrawTextLeft("S: %d > %d = %s", weight, SpecWeight, Tex->Name); */ \
 		Params.Specular = Tex;			\
 		SpecWeight = weight;			\
 	}
 #define SPECPOW(check,weight)			\
-	if (check && weight > SpecPowWeight)\
+	if (weight > SpecPowWeight && check)\
 	{									\
 	/*	DrawTextLeft("SP: %d > %d = %s", weight, SpecPowWeight, Tex->Name); */ \
 		Params.SpecPower = Tex;			\
 		SpecPowWeight = weight;			\
 	}
 #define OPACITY(check,weight)			\
-	if (check && weight > OpWeight)		\
+	if (weight > OpWeight && check)		\
 	{									\
 	/*	DrawTextLeft("O: %d > %d = %s", weight, OpWeight, Tex->Name); */ \
 		Params.Opacity = Tex;			\
 		OpWeight = weight;				\
 	}
 #define EMISSIVE(check,weight)			\
-	if (check && weight > EmWeight)		\
+	if (weight > EmWeight && check)		\
 	{									\
 	/*	DrawTextLeft("E: %d > %d = %s", weight, EmWeight, Tex->Name); */ \
 		Params.Emissive = Tex;			\
 		EmWeight = weight;				\
 	}
 #define CUBEMAP(check,weight)			\
-	if (check && weight > CubeWeight)	\
+	if (weight > CubeWeight && check)	\
 	{									\
 	/*	DrawTextLeft("CUB: %d > %d = %s", weight, CubeWeight, Tex->Name); */ \
 		Params.Cube = Tex;				\
 		CubeWeight = weight;			\
 	}
 #define BAKEDMASK(check,weight)			\
-	if (check && weight > MaskWeight)	\
+	if (weight > MaskWeight && check)	\
 	{									\
 	/*	DrawTextLeft("MASK: %d > %d = %s", weight, MaskWeight, Tex->Name); */ \
 		Params.Mask = Tex;				\
 		MaskWeight = weight;			\
 	}
 #define EMISSIVE_COLOR(check,weight)	\
-	if (check && weight > EmcWeight)	\
+	if (weight > EmcWeight && check)	\
 	{									\
 	/*	DrawTextLeft("EC: %d > %d = %g %g %g", weight, EmcWeight, FCOLOR_ARG(Color)); */ \
 		Params.EmissiveColor = Color;	\
@@ -2024,69 +2047,73 @@ void UMaterial3::GetParams(CMaterialParams &Params) const
 	{
 		UTexture3 *Tex = ReferencedTextures[i];
 		if (!Tex) continue;
-		const char *Name = Tex->Name;
+		// Prepare the texture name in lower case, so parameter checks will be faster
+		// (no "stricmp" or "appStristr" calls). Warning: all strcmp operations should use
+		// a lowercase string for comparison.
+		char Name[256];
+		appStrncpylwr(Name, Tex->Name, ARRAY_COUNT(Name));
 		int len = strlen(Name);
 		//!! - separate code (common for UMaterial3 + UMaterialInstanceConstant)
 		//!! - may implement with tables + macros
 		//!! - catch normalmap, specular and emissive textures
-		if (appStristr(Name, "noise")) continue;
-		if (appStristr(Name, "detail")) continue;
+		if (strstr(Name, "noise")) continue;
+		if (strstr(Name, "detail")) continue;
 
-		DIFFUSE(appStristr(Name, "diff"), 100);
-		NORMAL (appStristr(Name, "norm"), 100);
-		DIFFUSE(!stricmp(Name + len - 4, "_Tex"), 80);
-		DIFFUSE(appStristr(Name, "_Tex"), 60);
-		DIFFUSE(!stricmp(Name + len - 2, "_D"), 20);
-		OPACITY(appStristr(Name, "_OM"), 20);
-//		CUBEMAP(appStristr(Name, "cubemap"), 100); -- bad
+		DIFFUSE(strstr(Name, "diff"), 100);
+		NORMAL (strstr(Name, "norm"), 100);
+		DIFFUSE(!strcmp(Name + len - 4, "_tex"), 80);
+		DIFFUSE(strstr(Name, "_tex"), 60);
+		DIFFUSE(!strcmp(Name + len - 2, "_d"), 20);
+		OPACITY(strstr(Name, "_om"), 20);
+//		CUBEMAP(strstr(Name, "cubemap"), 100); -- bad
 #if 0
-		if (!stricmp(Name + len - 3, "_DI"))		// The Last Remnant ...
+		if (!strcmp(Name + len - 3, "_di"))		// The Last Remnant ...
 			Diffuse = Tex;
-		if (!strnicmp(Name + len - 4, "_DI", 3))	// The Last Remnant ...
+		if (!strnicmp(Name + len - 4, "_di", 3))	// The Last Remnant ...
 			Diffuse = Tex;
-		if (appStristr(Name, "_Diffuse"))
+		if (strstr(Name, "_diffuse"))
 			Diffuse = Tex;
 #endif
-		DIFFUSE (appStristr(Name, "_DI"), 20);
-//		DIFFUSE (appStristr(Name, "_MA"), 8 );		// The Last Remnant; low priority
-		DIFFUSE (appStristr(Name, "_D" ), 11);
-		DIFFUSE (appStristr(Name, "Albedo"), 19);
-		DIFFUSE (!stricmp(Name + len - 2, "_C"), 10);
-		DIFFUSE (!stricmp(Name + len - 3, "_CM"), 12);
-		NORMAL  (!stricmp(Name + len - 2, "_N"), 20);
-		NORMAL  (!stricmp(Name + len - 3, "_NM"), 20);
-		NORMAL  (appStristr(Name, "_N"), 9);
+		DIFFUSE (strstr(Name, "_di"), 20);
+//		DIFFUSE (strstr(Name, "_ma"), 8 );		// The Last Remnant; low priority
+		DIFFUSE (strstr(Name, "_d" ), 11);
+		DIFFUSE (strstr(Name, "albedo"), 19);
+		DIFFUSE (!strcmp(Name + len - 2, "_c"), 10);
+		DIFFUSE (!strcmp(Name + len - 3, "_cm"), 12);
+		NORMAL  (!strcmp(Name + len - 2, "_n"), 20);
+		NORMAL  (!strcmp(Name + len - 3, "_nm"), 20);
+		NORMAL  (strstr(Name, "_n"), 9);
 #if BULLETSTORM
 		if (ArGame == GAME_Bulletstorm)
 		{
-			DIFFUSE (appStristr(Name, "_C"), 12);
-			NORMAL(appStristr(Name, "_TS"), 5);
-			SPECULAR(appStristr(Name, "_S"), 5);
+			DIFFUSE (strstr(Name, "_c"), 12);
+			NORMAL(strstr(Name, "_ts"), 5);
+			SPECULAR(strstr(Name, "_s"), 5);
 		}
 #endif // BULLETSTORM
-		SPECULAR(!stricmp(Name + len - 2, "_S"), 20);
-		SPECULAR(appStristr(Name, "_S_"), 15);
-		SPECPOW (!stricmp(Name + len - 3, "_SP"), 20);
-		SPECPOW (!stricmp(Name + len - 3, "_SM"), 20);
-		SPECPOW (appStristr(Name, "_SP"), 9);
-		EMISSIVE(!stricmp(Name + len - 2, "_E"), 20);
-		EMISSIVE(!stricmp(Name + len - 3, "_EM"), 21);
-		OPACITY (!stricmp(Name + len - 2, "_A"), 20);
+		SPECULAR(!strcmp(Name + len - 2, "_s"), 20);
+		SPECULAR(strstr(Name, "_s_"), 15);
+		SPECPOW (!strcmp(Name + len - 3, "_sp"), 20);
+		SPECPOW (!strcmp(Name + len - 3, "_sm"), 20);
+		SPECPOW (strstr(Name, "_sp"), 9);
+		EMISSIVE(!strcmp(Name + len - 2, "_e"), 20);
+		EMISSIVE(!strcmp(Name + len - 3, "_em"), 21);
+		OPACITY (!strcmp(Name + len - 2, "_a"), 20);
 		if (bIsMasked)
 		{
-			OPACITY (!stricmp(Name + len - 5, "_Mask"), 2);
+			OPACITY (!strcmp(Name + len - 5, "_mask"), 2);
 		}
 		// Magna Catra 2
-		DIFFUSE (!strnicmp(Name, "df_", 3), 20);
-		SPECULAR(!strnicmp(Name, "sp_", 3), 20);
-//		OPACITY (!strnicmp(Name, "op_", 3), 20);
-		NORMAL  (!strnicmp(Name, "no_", 3), 20);
+		DIFFUSE (!strncmp(Name, "df_", 3), 20);
+		SPECULAR(!strncmp(Name, "sp_", 3), 20);
+//		OPACITY (!strncmp(Name, "op_", 3), 20);
+		NORMAL  (!strncmp(Name, "no_", 3), 20);
 
-		NORMAL  (appStristr(Name, "Norm"), 80);
-		EMISSIVE(appStristr(Name, "Emis"), 80);
-		SPECULAR(appStristr(Name, "Specular"), 80);
-		OPACITY (appStristr(Name, "Opac"),  80);
-		OPACITY (appStristr(Name, "Alpha"), 100);
+		NORMAL  (strstr(Name, "norm"), 80);
+		EMISSIVE(strstr(Name, "emis"), 80);
+		SPECULAR(strstr(Name, "specular"), 80);
+		OPACITY (strstr(Name, "opac"),  80);
+		OPACITY (strstr(Name, "alpha"), 100);
 
 		DIFFUSE(i == 0, 1);							// 1st texture as lowest weight
 //		CUBEMAP(Tex->IsTextureCube(), 1);			// any cubemap
@@ -2095,6 +2122,19 @@ void UMaterial3::GetParams(CMaterialParams &Params) const
 	if ( (Params.Diffuse == Params.Normal && DiffWeight < NormWeight) ||
 		 (Params.Diffuse && Params.Diffuse->IsTextureCube()) )
 		Params.Diffuse = NULL;
+
+#if UNREAL4
+	if (ArGame >= GAME_UE4_BASE)
+	{
+		Params.PBRMaterial = true;
+		if (Params.Specular)
+		{
+			// PRB material, no specular color
+			Params.SpecPower = Params.Specular;
+			Params.Specular = NULL;
+		}
+	}
+#endif // UNREA:4
 
 	unguard;
 }
@@ -2384,6 +2424,7 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 	if (Parent && Parent != this) Parent->GetParams(Params);
 
 	Super::GetParams(Params);
+	CMaterialParams ParemtParams = Params;
 
 	// get local parameters
 	int DiffWeight = 0, NormWeight = 0, SpecWeight = 0, SpecPowWeight = 0, OpWeight = 0, EmWeight = 0, EmcWeight = 0, CubeWeight = 0, MaskWeight = 0;
@@ -2397,66 +2438,87 @@ void UMaterialInstanceConstant::GetParams(CMaterialParams &Params) const
 	for (i = 0; i < TextureParameterValues.Num(); i++)
 	{
 		const FTextureParameterValue &P = TextureParameterValues[i];
-		const char *Name = P.GetName();
+		// Prepare the texture name in lower case, so parameter checks will be faster
+		char Name[256];
+		appStrncpylwr(Name, P.GetName(), ARRAY_COUNT(Name));
 		UTexture3  *Tex  = P.ParameterValue;
 		if (!Tex) continue;
 
-		if (appStristr(Name, "detail")) continue;	// details normal etc
+		if (strstr(Name, "detail")) continue;	// details normal etc
+		if (strstr(Name, "gradient")) continue; // emissive gradient etc
 
-		DIFFUSE (appStristr(Name, "dif"), 100);
-		DIFFUSE (appStristr(Name, "albedo"), 100);
-		DIFFUSE (appStristr(Name, "color"), 80);
-		NORMAL  (appStristr(Name, "norm") && !appStristr(Name, "fx"), 100);
-		SPECPOW (appStristr(Name, "specpow"), 100);
-		SPECULAR(appStristr(Name, "spec"), 100);
-		EMISSIVE(appStristr(Name, "emiss"), 100);
-		CUBEMAP (appStristr(Name, "cube"), 100);
-		CUBEMAP (appStristr(Name, "refl"), 90);
-		OPACITY (appStristr(Name, "opac"), 90);
-		OPACITY (appStristr(Name, "trans") && !appStristr(Name, "transm"), 80);
-		OPACITY (appStristr(Name, "opacity"), 100);
-		OPACITY (appStristr(Name, "alpha"), 100);
-//??		OPACITY (appStristr(Name, "mask"), 100);
+		DIFFUSE (strstr(Name, "dif"), 100);
+		DIFFUSE (strstr(Name, "albedo"), 100);
+		DIFFUSE (strstr(Name, "color"), 80);
+		NORMAL  (strstr(Name, "norm") && !strstr(Name, "fx"), 100);
+		SPECPOW (strstr(Name, "specpow"), 100);
+		SPECULAR(strstr(Name, "spec"), 100);
+		EMISSIVE(strstr(Name, "emiss"), 100);
+		CUBEMAP (strstr(Name, "cube"), 100);
+		CUBEMAP (strstr(Name, "refl"), 90);
+		OPACITY (strstr(Name, "opac"), 90);
+		OPACITY (strstr(Name, "trans") && !strstr(Name, "transm"), 80);
+		OPACITY (strstr(Name, "opacity"), 100);
+		OPACITY (strstr(Name, "alpha"), 100);
+//??		OPACITY (strstr(Name, "mask"), 100);
 //??		Params.OpacityFromAlpha = true;
 #if TRON
 		if (ArGame == GAME_Tron)
 		{
-			SPECPOW (appStristr(Name, "SPPW"), 100);
-			EMISSIVE(appStristr(Name, "Emss"), 100);
-			BAKEDMASK(appStristr(Name, "Mask"), 100);
+			SPECPOW(strstr(Name, "sppw"), 100);
+			EMISSIVE(strstr(Name, "emss"), 100);
+			BAKEDMASK(strstr(Name, "mask"), 100);
 		}
 #endif // TRON
 #if BATMAN
 		if (ArGame == GAME_Batman2)
 		{
-			BAKEDMASK(!stricmp(Name, "Material_Attributes"), 100);
-			EMISSIVE (appStristr(Name, "Reflection_Mask"), 100);
+			BAKEDMASK(!strcmp(Name, "material_attributes"), 100);
+			EMISSIVE (strstr(Name, "reflection_mask"), 100);
 		}
 #endif // BATMAN
 #if BLADENSOUL
 		if (ArGame == GAME_BladeNSoul)
 		{
-			BAKEDMASK(!stricmp(Name, "Body_mask_RGB"), 100);
+			BAKEDMASK(!strcmp(Name, "body_mask_rgb"), 100);
 		}
 #endif // BLADENSOUL
 #if DISHONORED
 		if (ArGame == GAME_Dishonored)
 		{
-			CUBEMAP (appStristr(Name, "cubemap_tex"), 100);
-			EMISSIVE(appStristr(Name, "cubemap_mask"), 100);
+			CUBEMAP (strstr(Name, "cubemap_tex"), 100);
+			EMISSIVE(strstr(Name, "cubemap_mask"), 100);
 		}
 #endif // DISHONORED
+#if UNREAL4
+		if (ArGame >= GAME_UE4_BASE)
+		{
+			// PRB material, no specular color
+			Params.PBRMaterial = true;
+			if (Params.Specular)
+			{
+				Params.SpecPower = Params.Specular;
+				Params.Specular = NULL;
+			}
+			if (ParemtParams.Emissive == Params.Emissive &&
+				ParemtParams.Diffuse != Params.Diffuse)
+			{
+				// Reset emissive if it came from parent, and diffuse has been changed locally
+				Params.Emissive = NULL;
+			}
+		}
+#endif // UNREA:4
 	}
 	for (i = 0; i < VectorParameterValues.Num(); i++)
 	{
 		const FVectorParameterValue &P = VectorParameterValues[i];
 		const char *Name = P.GetName();
 		const FLinearColor &Color = P.ParameterValue;
-		EMISSIVE_COLOR(appStristr(Name, "Emissive"), 100);
+		EMISSIVE_COLOR(strstr(Name, "emissive"), 100);
 #if TRON
 		if (ArGame == GAME_Tron)
 		{
-			EMISSIVE_COLOR(appStristr(Name, "PipingColour"), 90);
+			EMISSIVE_COLOR(strstr(Name, "pipingcolour"), 90);
 		}
 #endif
 	}

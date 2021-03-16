@@ -5,6 +5,7 @@
 #include <SDL2/SDL_syswm.h>			// for SDL_SysWMinfo, does <windows.h> includes
 #undef UnregisterClass
 #undef GetClassName
+#undef Bool
 
 #include "UnCore.h"
 #include "UnObject.h"
@@ -321,10 +322,10 @@ int CUmodelApp::ShowUE4UnversionedPackageDialog(int verMin, int verMax)
 	return dialog.Show(verMin, verMax);
 }
 
-FString CUmodelApp::ShowUE4AesKeyDialog()
+bool CUmodelApp::ShowUE4AesKeyDialog(TArray<FString>& Values)
 {
 	UIUE4AesKeyDialog dialog;
-	return dialog.Show();
+	return dialog.Show(Values);
 }
 
 #endif // UNREAL4
@@ -376,7 +377,7 @@ bool CUmodelApp::CreateVisualizer(UObject *Obj, bool test)
 		{											\
 			UClass *Obj2 = static_cast<UClass*>(Obj); \
 			if (!Obj2->ConvertedMesh)				\
-				Viewer = new CObjectViewer(Obj, this); \
+				Viewer = new CObjectViewer(Obj, this, true); \
 			else									\
 				Viewer = new CViewer(Obj2->ConvertedMesh, this); \
 		}											\
@@ -406,7 +407,7 @@ bool CUmodelApp::CreateVisualizer(UObject *Obj, bool test)
 	// fallback for unknown class
 	if (!test)
 	{
-		Viewer = new CObjectViewer(Obj, this);
+		Viewer = new CObjectViewer(Obj, this, true);
 	}
 	return false;
 #undef CLASS_VIEWER

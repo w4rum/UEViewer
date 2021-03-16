@@ -301,6 +301,11 @@ struct FRecomputeTangentCustomVersion
 		BeforeCustomVersionWasAdded = 0,
 		// UE4.12
 		RuntimeRecomputeTangent = 1,
+		// UE4.26
+		RecomputeTangentVertexColorMask = 2,
+
+		VersionPlusOne,
+		LatestVersion = VersionPlusOne - 1
 	};
 
 	static int Get(const FArchive& Ar)
@@ -312,7 +317,12 @@ struct FRecomputeTangentCustomVersion
 
 		if (Ar.Game < GAME_UE4(12))
 			return BeforeCustomVersionWasAdded;
-		return RuntimeRecomputeTangent;
+		if (Ar.Game < GAME_UE4(26))
+			return RuntimeRecomputeTangent;
+//		if (Ar.Game < GAME_UE4(27))
+			return RecomputeTangentVertexColorMask;
+		// NEW_ENGINE_VERSION
+//		return LatestVersion;
 	}
 };
 
@@ -678,6 +688,12 @@ struct FSkelMeshSection4
 			Ar << bRecomputeTangent;
 		}
 
+		if (FRecomputeTangentCustomVersion::Get(Ar) >= FRecomputeTangentCustomVersion::RecomputeTangentVertexColorMask)
+		{
+			uint8 RecomputeTangentsVertexMaskChannel;
+			Ar << RecomputeTangentsVertexMaskChannel;
+		}
+
 		if (FEditorObjectVersion::Get(Ar) >= FEditorObjectVersion::RefactorMeshEditorMaterials)
 		{
 			Ar << S.bCastShadow;
@@ -806,6 +822,11 @@ struct FSkelMeshSection4
 
 		bool bRecomputeTangent;
 		Ar << bRecomputeTangent;
+		if (FRecomputeTangentCustomVersion::Get(Ar) >= FRecomputeTangentCustomVersion::RecomputeTangentVertexColorMask)
+		{
+			uint8 RecomputeTangentsVertexMaskChannel;
+			Ar << RecomputeTangentsVertexMaskChannel;
+		}
 
 		Ar << S.bCastShadow;
 		Ar << S.BaseVertexIndex;
@@ -1798,6 +1819,15 @@ void USkeletalMesh4::Serialize(FArchive &Ar)
 		}
 		bool bCooked;
 		Ar << bCooked;
+
+		if (Ar.Game >= GAME_UE4(27))
+		{
+			// The serialization of this variable is cvar-dependent in UE4, so there's no clear way to understand
+			// if it should be serialize in our code or not.
+			int32 MinMobileLODIdx;
+			Ar << MinMobileLODIdx;
+		}
+
 		if (bCooked && LODModels.Num() == 0)
 		{
 			// serialize cooked data only if editor data not exists - use custom array serializer function
@@ -2061,6 +2091,12 @@ UStaticMesh4::~UStaticMesh4()
 	delete ConvertedMesh;
 }
 
+FSkeletalMeshLODInfo::FSkeletalMeshLODInfo()
+{}
+
+FSkeletalMeshLODInfo::~FSkeletalMeshLODInfo()
+{}
+
 
 // Ambient occlusion data
 // When changed, constant DISTANCEFIELD_DERIVEDDATA_VER TEXT is updated
@@ -2213,6 +2249,35 @@ struct FWeightedRandomSampler
 		return Ar << S.Prob << S.Alias << S.TotalWeight;
 	}
 };
+
+FArchive& operator<<(FArchive& Ar, FSkeletalMeshSamplingLODBuiltData& V)
+{
+	// Serialize FSkeletalMeshAreaWeightedTriangleSampler AreaWeightedSampler
+	// It is derived from FWeightedRandomSampler
+	FWeightedRandomSampler Sampler;
+	return Ar << Sampler;
+}
+
+FArchive& operator<<(FArchive& Ar, FSkeletalMeshSamplingRegionBuiltData& V)
+{
+	TArray<int32> TriangleIndices;
+	TArray<int32> BoneIndices;
+
+	Ar << TriangleIndices;
+	Ar << BoneIndices;
+
+	// Serialize FSkeletalMeshAreaWeightedTriangleSampler AreaWeightedSampler
+	// It is derived from FWeightedRandomSampler
+	FWeightedRandomSampler Sampler;
+	Ar << Sampler;
+
+	if (Ar.Game >= GAME_UE4(21)) // FNiagaraObjectVersion::SkeletalMeshVertexSampling
+	{
+		TArray<int32> Vertices;
+		Ar << Vertices;
+	}
+	return Ar;
+}
 
 typedef FWeightedRandomSampler FStaticMeshSectionAreaWeightedTriangleSampler;
 typedef FWeightedRandomSampler FStaticMeshAreaWeightedSectionSampler;
@@ -2540,6 +2605,7 @@ no_nav_collision:
 	Ar << LightingGuid;
 
 	//!! TODO: support sockets
+	// Warning: serialized twice - as UPROPERTY and as a binary serializer
 	Ar << Sockets;
 	if (Sockets.Num()) appPrintf("StaticMesh has %d sockets\n", Sockets.Num());
 
@@ -2611,6 +2677,13 @@ no_nav_collision:
 		// Note: code below still contains 'if (bCooked)' switches, this is because the same
 		// code could be used to read data from DDC, for non-cooked assets.
 		DBG_STAT("Serializing RenderData\n");
+		if (Ar.Game >= GAME_UE4(27))
+		{
+			// The serialization of this variable is cvar-dependent in UE4, so there's no clear way to understand
+			// if it should be serialize in our code or not.
+			int32 MinMobileLODIdx;
+			Ar << MinMobileLODIdx;
+		}
 		if (!bCooked)
 		{
 			TArray<int> WedgeMap;

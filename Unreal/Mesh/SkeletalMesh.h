@@ -28,6 +28,7 @@ TODO:
 
 #define MAX_MESHBONES				(1024*3)		// NGD had a mesh with ~2100 bones! (basepose_0000.uasset)
 #define NUM_INFLUENCES				4
+//#define SUPPORT_SCALE_KEYS			1
 //#define ANIM_DEBUG_INFO				1
 
 struct CSkelMeshVertex : public CMeshVertex
@@ -88,7 +89,7 @@ struct CSkelMeshLod : public CBaseMeshLod
 #if DECLARE_VIEWER_PROPS
 	DECLARE_STRUCT(CSkelMeshLod)
 	BEGIN_PROP_TABLE
-		PROP_ARRAY(Sections, CMeshSection)
+		PROP_ARRAY(Sections, "CMeshSection")
 		PROP_INT(NumVerts)
 		VPROP_ARRAY_COUNT(Indices.Indices16, IndexCount)
 		PROP_INT(NumTexCoords)
@@ -140,7 +141,7 @@ struct CSkelMeshSocket
 class CSkeletalMesh
 {
 public:
-	UObject*				OriginalMesh;			//?? make common for all mesh classes
+	const UObject*			OriginalMesh;			//?? make common for all mesh classes
 	FBox					BoundingBox;			//?? common
 	FSphere					BoundingSphere;			//?? common
 	CVec3					MeshOrigin;
@@ -152,7 +153,7 @@ public:
 	TArray<CSkelMeshSocket>	Sockets;				//?? common (UE4 has StaticMesh sockets)
 	const class CAnimSet*	Anim;
 
-	CSkeletalMesh(UObject *Original)
+	CSkeletalMesh(const UObject *Original)
 	:	OriginalMesh(Original)
 	,	Anim(NULL)
 	{}
@@ -188,13 +189,13 @@ public:
 #if DECLARE_VIEWER_PROPS
 	DECLARE_STRUCT(CSkeletalMesh)
 	BEGIN_PROP_TABLE
-		PROP_ARRAY(Lods, CSkelMeshLod)
+		PROP_ARRAY(Lods, "CSkelMeshLod")
 		VPROP_ARRAY_COUNT(Lods, LodCount)
 		PROP_VECTOR(MeshOrigin)						// CVec3 as FVector
 		PROP_VECTOR(MeshScale)
 		PROP_ROTATOR(RotOrigin)
 		VPROP_ARRAY_COUNT(RefSkeleton, BoneCount)
-		PROP_ARRAY(Sockets, CSkelMeshSocket)
+		PROP_ARRAY(Sockets, "CSkelMeshSocket")
 		VPROP_ARRAY_COUNT(Sockets, SocketCount)
 	END_PROP_TABLE
 private:
@@ -235,21 +236,39 @@ struct CAnimTrack
 {
 	TStaticArray<CQuat, 1>	KeyQuat;
 	TStaticArray<CVec3, 1>	KeyPos;
+#if SUPPORT_SCALE_KEYS
+	TStaticArray<CVec3, 1>	KeyScale;
+#endif
 	// 3 time arrays; should be used either KeyTime or KeyQuatTime + KeyPosTime
 	// When the corresponding array is empty, it will assume that Array[i] == i
 	TStaticArray<float, 1>	KeyTime;
 	TStaticArray<float, 1>	KeyQuatTime;
 	TStaticArray<float, 1>	KeyPosTime;
+#if SUPPORT_SCALE_KEYS
+	TStaticArray<float, 1>	KeyScaleTime;
+#endif
 
-	// DstPos and DstQuat will not be changed when KeyPos and KeyQuat are empty
+	// DstPos and/or DstQuat will not be changed when KeyPos and/or KeyQuat are empty.
 	void GetBonePosition(float Frame, float NumFrames, bool Loop, CVec3 &DstPos, CQuat &DstQuat) const;
+
 	inline bool HasKeys() const
 	{
+#if !SUPPORT_SCALE_KEYS
 		return (KeyQuat.Num() + KeyPos.Num()) > 0;
+#else
+		return (KeyQuat.Num() + KeyPos.Num() + KeyScale.Num()) > 0;
+#endif
 	}
+
 	void CopyFrom(const CAnimTrack &Src);
 };
 
+// Local analog of FTransform
+struct CSkeletonBonePosition
+{
+	CVec3 Position;
+	CQuat Orientation;
+};
 
 class CAnimSequence
 {
@@ -259,12 +278,15 @@ public:
 	float					Rate;
 	TArray<CAnimTrack*>		Tracks;					// for each CAnimSet.TrackBoneNames
 	bool					bAdditive;				// used just for on-screen information
+	const UObject*			OriginalSequence;
+	TArray<CSkeletonBonePosition> RetargetBasePose;
 #if ANIM_DEBUG_INFO
 	FString					DebugInfo;
 #endif
 
-	CAnimSequence()
+	CAnimSequence(const UObject* Original = NULL)
 	: bAdditive(false)
+	, OriginalSequence(Original)
 	{}
 
 	~CAnimSequence()
@@ -277,32 +299,55 @@ public:
 };
 
 
-// taken from UE3/SkeletalMeshComponent
-enum EAnimRotationOnly
+enum class EAnimRetargetingMode
 {
-	/** Use settings defined in each AnimSet (default) */
-	EARO_AnimSet,
-	/** Force AnimRotationOnly enabled on all AnimSets, but for this SkeletalMesh only */
-	EARO_ForceEnabled,
-	/** Force AnimRotationOnly disabled on all AnimSets, but for this SkeletalMesh only */
-	EARO_ForceDisabled
+	// Use settings defined in each AnimSet (default)
+	AnimSet = 0,
+	// Force AnimRotationOnly enabled on all AnimSets, but for this SkeletalMesh only
+	AnimRotationOnly,
+	// Always pick data from the animation, no retargeting
+	NoRetargeting,
+
+	Count
 };
 
+
+enum class EBoneRetargetingMode : uint8
+{
+	// Use translation from animation
+	Animation,
+	// Use translation from mesh
+	Mesh,
+	// Recompute translation from difference between mesh and animation skeletons
+	OrientAndScale,
+
+	Count
+};
 
 class CAnimSet
 {
 public:
-	UObject					*OriginalAnim;			//?? make common for all mesh classes
+	const UObject*			OriginalAnim;			//?? make common for all mesh classes
 	TArray<FName>			TrackBoneNames;
+	TArray<CSkeletonBonePosition> BonePositions;	// may be empty (for pre-UE4), position in array matches TrackBoneNames
 	TArray<CAnimSequence*>	Sequences;
 
-	bool					AnimRotationOnly;
-	TArray<bool>			UseAnimTranslation;		// per bone; used with AnimRotationOnly mode
-	TArray<bool>			ForceMeshTranslation;	// pre bone; used regardless of AnimRotationOnly
+	TArray<EBoneRetargetingMode> BoneModes;
 
-	CAnimSet(UObject *Original)
+	CAnimSet()
+	{}
+
+	CAnimSet(const UObject *Original)
 	:	OriginalAnim(Original)
 	{}
+
+	// Make a copy of CAnimSet, except animations
+	void CopyAllButSequences(const CAnimSet& Other)
+	{
+		OriginalAnim = Other.OriginalAnim;
+		CopyArray(TrackBoneNames, Other.TrackBoneNames);
+		CopyArray(BoneModes, Other.BoneModes);
+	}
 
 	~CAnimSet()
 	{
@@ -310,22 +355,41 @@ public:
 			delete Sequences[i];
 	}
 
-	bool ShouldAnimateTranslation(int BoneIndex, EAnimRotationOnly RotationMode = EARO_AnimSet) const
+	EBoneRetargetingMode GetBoneTranslationMode(int BoneIndex, EAnimRetargetingMode RetargetingMode = EAnimRetargetingMode::AnimSet) const
 	{
-		if (BoneIndex == 0)							// root bone is always fully animated
-			return true;
+		if (BoneIndex == 0)
+		{
+			// Root bone is always fully animated
+			return EBoneRetargetingMode::Animation;
+		}
+#if 0
+		// OLD code, returns just true for animated translation and false for non-animated
 		if (ForceMeshTranslation.Num() && ForceMeshTranslation[BoneIndex])
 			return false;
 		bool AnimRotationOnly2 = AnimRotationOnly;
-		if (RotationMode == EARO_ForceEnabled)
+		if (RotationMode == EAnimRotationOnly::ForceEnabled)
 			AnimRotationOnly2 = true;
-		else if (RotationMode == EARO_ForceDisabled)
+		else if (RotationMode == EAnimRotationOnly::ForceDisabled)
 			AnimRotationOnly2 = false;
 		if (!AnimRotationOnly2)
 			return true;
 		if (UseAnimTranslation.Num() && UseAnimTranslation[BoneIndex])
 			return true;
 		return false;
+#else
+		// Global override
+		if (RetargetingMode == EAnimRetargetingMode::AnimRotationOnly)
+			return EBoneRetargetingMode::Mesh;
+		else if (RetargetingMode == EAnimRetargetingMode::NoRetargeting)
+			return EBoneRetargetingMode::Animation;
+
+		// Per-bone settings
+		if (BoneModes.IsValidIndex(BoneIndex))
+		{
+			return BoneModes[BoneIndex];
+		}
+		return EBoneRetargetingMode::Animation;
+#endif
 	}
 };
 

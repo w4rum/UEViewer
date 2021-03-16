@@ -49,7 +49,7 @@ const char *UObject::GetRealClassName() const
 {
 	if (!Package || (PackageIndex == INDEX_NONE)) return GetClassName();
 	const FObjectExport &Exp = Package->GetExport(PackageIndex);
-	return Package->GetObjectName(Exp.ClassIndex);
+	return Package->GetClassNameFor(Exp);
 }
 
 const char *UObject::GetPackageName() const
@@ -157,37 +157,40 @@ void UObject::EndLoad()
 
 	guard(UObject::EndLoad);
 
-	// process GObjLoaded array
-	// NOTE: while loading one array element, array may grow!
-	TArray<UObject*> LoadedObjects;
+	// Process GObjLoaded array. Note that GObjLoaded may receive new element during PostLoad call
+	// (e.g. UMaterial3::ScanUE4Textures() does that), so we should use an outer loop to ensure
+	// all objects will be loaded.
 	while (GObjLoaded.Num())
 	{
-		UObject *Obj = GObjLoaded[0];
-		GObjLoaded.RemoveAt(0);
-		UnPackage *Package = Obj->Package;
+		TArray<UObject*> LoadedObjects;
+		while (GObjLoaded.Num())
+		{
+			UObject *Obj = GObjLoaded[0];
+			GObjLoaded.RemoveAt(0);
+			UnPackage *Package = Obj->Package;
 
-		guard(LoadObject);
-		PROFILE_LABEL(Obj->GetClassName());
+			guard(LoadObject);
+			PROFILE_LABEL(Obj->GetClassName());
 
 		Package->SetupReader(Obj->PackageIndex);
 		//appPrintf("Loading %s %s from package %s\n", Obj->GetClassName(), Obj->Name, *Package->GetFilename());
 		// setup NotifyInfo to describe object
 		appSetNotifyHeader("Loading object %s'%s.%s'", Obj->GetClassName(), Package->Name, Obj->Name);
 #if PROFILE_LOADING
-		appResetProfiler();
+			appResetProfiler();
 #endif
-		GLoadingObj = Obj;
-		Obj->Serialize(*Package);
-		GLoadingObj = NULL;
+			GLoadingObj = Obj;
+			Obj->Serialize(*Package);
+			GLoadingObj = NULL;
 #if PROFILE_LOADING
-		appPrintProfiler();
+			appPrintProfiler();
 #endif
-		// check for unread bytes
-		if (!Package->IsStopper())
-			appError("%s::Serialize(%s): %d unread bytes",
-				Obj->GetClassName(), Obj->Name,
-				Package->GetStopper() - Package->Tell());
-		LoadedObjects.Add(Obj);
+			// check for unread bytes
+			if (!Package->IsStopper())
+				appError("%s::Serialize(%s): %d unread bytes",
+					Obj->GetClassName(), Obj->Name,
+					Package->GetStopper() - Package->Tell());
+			LoadedObjects.Add(Obj);
 
 #if UNREAL4
 	#define UNVERS_STR		(Package->Game >= GAME_UE4_BASE && Package->Summary.IsUnversioned) ? " (unversioned)" : ""
@@ -197,25 +200,23 @@ void UObject::EndLoad()
 	#define EDITOR_STR		""
 #endif
 
-		unguardf("%s'%s.%s', pos=%X, ver=%d/%d%s%s, game=%s", Obj->GetClassName(), Package->Name, Obj->Name, Package->Tell(),
-			Package->ArVer, Package->ArLicenseeVer, UNVERS_STR, EDITOR_STR, GetGameTag(Package->Game));
+			unguardf("%s'%s.%s', pos=%X, ver=%d/%d%s%s, game=%s", Obj->GetClassName(), Package->Name, Obj->Name, Package->Tell(),
+				Package->ArVer, Package->ArLicenseeVer, UNVERS_STR, EDITOR_STR, GetGameTag(Package->Game));
+		}
+		// postload objects
+		for (UObject* Obj : LoadedObjects)
+		{
+			guard(PostLoad);
+			Obj->PostLoad();
+			unguardf("%s", Obj->Name);
+		}
 	}
-	// postload objects
-	for (UObject* Obj : LoadedObjects)
-	{
-		guard(PostLoad);
-		Obj->PostLoad();
-		unguardf("%s", Obj->Name);
-	}
-	// cleanup
-	guard(Cleanup);
-	GObjLoaded.Empty();
+
+	// Cleanup
 	GObjBeginLoadCount--;		// decrement after loading
 	appSetNotifyHeader(NULL);
 	assert(GObjBeginLoadCount == 0);
-	unguard;
-
-	// close all opened file handles
+	// Close all opened file handles
 	UnPackage::CloseAllReaders();
 
 	unguard;
@@ -231,39 +232,41 @@ void UObject::EndLoad()
 static bool SerializeStruc(FArchive &Ar, void *Data, int Index, const char *StrucName)
 {
 	guard(SerializeStruc);
-#define STRUC_TYPE(name)				\
-	if (!strcmp(StrucName, #name))		\
-	{									\
-		Ar << ((name*)Data)[Index];		\
-		return true;					\
-	}
-	STRUC_TYPE(FVector)
-	STRUC_TYPE(FRotator)
-	STRUC_TYPE(FColor)
+
+	bool bForceTaggedSerialize = false;
+
 #if MKVSDC
-	if (Ar.Game == GAME_MK && Ar.ArVer >= 677)
+	if (Ar.Game == GAME_MK && Ar.ArVer >= 677 && !strcmp(StrucName, "FBoxSphereBounds"))
 	{
-		STRUC_TYPE(FBoxSphereBounds)
+		// Native serializer for FBoxSphereBounds in MK
+		Ar << *(FBoxSphereBounds*)Data;
+		return true;
 	}
 #endif // MKVSDC
-	if (Ar.ArVer >= 300)	// real version is unknown; native FLinearColor serializer does not work with EndWar
+	if (Ar.ArVer < 300 && !strcmp(StrucName, "FLinearColor"))
 	{
-		STRUC_TYPE(FLinearColor)
+		// real version is unknown; native FLinearColor serializer does not work with EndWar
+		bForceTaggedSerialize = true;
 	}
-#if UNREAL4
-	if (Ar.Game >= GAME_UE4_BASE)
-	{
-		/// reference: CoreUObject/Classes/Object.h
-		/// objects with native serializer has "atomic" or "immutable" mark
-		STRUC_TYPE(FIntPoint)
-		STRUC_TYPE(FLinearColor)
-	}
-#endif // UNREAL4
+
 	// Serialize nested property block
 	const CTypeInfo *ItemType = FindStructType(StrucName);
 	if (!ItemType) return false;
-	ItemType->SerializeUnrealProps(Ar, (byte*)Data + Index * ItemType->SizeOf);
+	if (ItemType->NativeSerializer)
+	{
+		guard(NativeSerializer);
+	#if DEBUG_PROPS
+		appPrintf(">>> Native: %s\n", ItemType->Name);
+	#endif
+		ItemType->NativeSerializer(Ar, (byte*)Data + Index * ItemType->SizeOf);
+		unguard;
+	}
+	else
+	{
+		ItemType->SerializeUnrealProps(Ar, (byte*)Data + Index * ItemType->SizeOf);
+	}
 	return true;
+
 	unguardf("%s", StrucName);
 }
 
@@ -803,11 +806,11 @@ static bool FindPropBat2(const CTypeInfo *StrucType, const FPropertyTagBat2 &Tag
 		// Note: StrucType could correspond to a few classes from the list about
 		// because of inheritance, so don't "break" a loop when we've scanned some class, check
 		// other classes too
-		bool OurClass = StrucType->IsA(p->Name);
+		bool IsOurClass = StrucType->IsA(p->Name);
 
 		while (++p < end && p->Name)
 		{
-			if (!OurClass) continue;
+			if (!IsOurClass) continue;
 
 //			appPrintf("      ... check %s\n", p->Name);
 			if (p->Offset == TagBat.Offset)
@@ -820,6 +823,7 @@ static bool FindPropBat2(const CTypeInfo *StrucType, const FPropertyTagBat2 &Tag
 				return true;
 			}
 		}
+		if (IsOurClass) break;				// the class has been verified, and we didn't find a property
 		p++;								// skip END marker
 	}
 
@@ -891,13 +895,31 @@ no_net_index:
 	if (Type->IsA("Class"))		// no properties for UClass
 		return;
 
-	Type->SerializeUnrealProps(Ar, this);
+#if UNREAL4
+	if ((Ar.Game >= GAME_UE4(26)) && (Package->Summary.PackageFlags & PKG_UnversionedProperties))
+	{
+	#if DEBUG_PROPS
+		DUMP_ARC_BYTES(Ar, 512, "ALL");
+	#endif
+		Type->SerializeUnversionedProperties4(Ar, this);
+	}
+	else
+#endif // UNREAL4
+	{
+		Type->SerializeUnrealProps(Ar, this);
+	}
 
 #if UNREAL4
 	if (Ar.Game >= GAME_UE4_BASE)
 	{
+		// PossiblySerializeObjectGuid()
 		int bSerializeGuid;
 		Ar << bSerializeGuid;
+		if (Ar.Game >= GAME_UE4(26) && (Package->Summary.PackageFlags & PKG_UnversionedProperties))
+		{
+			if (bSerializeGuid != 0 && bSerializeGuid != 1)
+				appError("Unversioned properties problem");
+		}
 		if (bSerializeGuid)
 		{
 			FGuid guid;
@@ -914,7 +936,7 @@ no_net_index:
 // UStruct::SerializeVersionedTaggedProperties()
 //  -> FPropertyTag::SerializeTaggedProperty()
 //  -> FXxxProperty::SerializeItem()
-void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
+void CTypeInfo::SerializeUnrealProps(FArchive& Ar, void* ObjectData) const
 {
 	guard(CTypeInfo::SerializeUnrealProps);
 
@@ -927,185 +949,77 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 #	define PROP_DBG(fmt, ...)
 #endif
 
-	int PropTagPos;
+#if BATMAN
+	if (Ar.Game >= GAME_Batman2 && Ar.Game <= GAME_Batman4)
+	{
+		SerializeBatmanProps(Ar, ObjectData);
+		return;
+	}
+#endif // BATMAN
+
+	if (NativeSerializer)
+	{
+		guard(NativeSerializer);
+	#if DEBUG_PROPS
+		appPrintf(">>> Native: %s\n", Name);
+	#endif
+		NativeSerializer(Ar, ObjectData);
+		return;
+		unguard;
+	}
 
 #if DEBUG_PROPS
-	appPrintf("-- Property list for %s --\n", Name);
+	appPrintf(">>> Enter struct: %s\n", Name);
 #endif
 
 	// property list
 	while (true)
 	{
 		FPropertyTag Tag;
-		PropTagPos = Ar.Tell();
-
-#if BATMAN
-		//!! try to move to separate function
-		if (Ar.Game >= GAME_Batman2 && Ar.Game <= GAME_Batman4)
-		{
-			// Batman 2 has more compact FPropertyTag implementation which uses serialization
-			// by offset, not by name - this should work faster (in game) and use less disk space.
-			FPropertyTagBat2 TagBat;
-			Ar << TagBat;
-			if (!TagBat.Type)			// end marker
-				break;
-
-#if DEBUG_PROPS
-			const char *TypeName = "??";
-			if (TagBat.Type < 16)
-				TypeName = GetTypeName(TagBat.Type);
-			else if (TagBat.Type == 16)
-				TypeName = "ObjectNCRProperty";
-			else if (TagBat.Type == 17)
-				TypeName = "GuidProperty";
-			appPrintf("Prop: type=%d (%s) offset=0x%X size=%d propName=%s\n", TagBat.Type, TypeName, TagBat.Offset, TagBat.DataSize, *TagBat.PropertyName);
-#endif // DEBUG_PROPS
-			if (stricmp(TagBat.PropertyName, "None") != 0)
-			{
-				// Property has extra information, it should serialized as in original engine.
-				// Convert tag to the standard format.
-				Tag.Name       = TagBat.PropertyName;
-				Tag.Type       = TagBat.Type;
-				Tag.DataSize   = TagBat.DataSize;
-				Tag.ArrayIndex = TagBat.ArrayIndex;
-				Tag.BoolValue  = TagBat.BoolValue;
-				goto read_property;
-			}
-			else
-			{
-				static byte Dummy[16];
-				byte *value = Dummy;
-				const int ArrayIndex = 0; // used in PROP macro
-				if (FindPropBat2(this, TagBat, Tag, Ar.Game))
-				{
-					const CPropInfo *Prop = FindProperty(Tag.Name);
-					if (Prop)
-						value = (byte*)ObjectData + Prop->Offset;
-				}
-
-				// offset-based ("simple property") serialization
-				switch (TagBat.Type)
-				{
-				case NAME_FloatProperty:
-					Ar << PROP(float);
-					PROP_DBG("%g", PROP(float));
-					break;
-
-				case NAME_NameProperty:
-					Ar << PROP(FName);
-					PROP_DBG("%s", *PROP(FName));
-					break;
-
-				case NAME_StrProperty:
-					{
-						//!! implement (needs inplace constructor/destructor, will not work for Dummy[])
-						FString s;
-						Ar << s;
-//						appPrintf("... value = %s\n", *s);
-					}
-					break;
-
-				case 16: // NAME_ObjectNCRProperty
-					Ar << PROP(UObject*);
-					PROP_DBG("%s", PROP(UObject*) ? PROP(UObject*)->Name : "Null");
-					break;
-
-				case NAME_BoolProperty:
-					{
-						int BoolValue;
-						Ar << BoolValue;
-						PROP(bool) = (BoolValue != 0);
-						PROP_DBG("%08X", BoolValue);
-						// Ugly hack to support Batman4 bool properties
-						if (Ar.Game == GAME_Batman4)
-						{
-							struct BoolPropInfo
-							{
-								const char* ClassName;
-								const char* PropName;
-								uint16		PropOffset;
-								uint16		PropMask;
-							};
-							static const BoolPropInfo BoolProps[] =
-							{
-								{ "SkeletalMesh3", "bHasVertexColors", 0x528, 2 },
-								{ "AnimSet", "bAnimRotationOnly", 0x5C, 1 },
-							};
-							for (int i = 0; i < ARRAY_COUNT(BoolProps); i++)
-							{
-								const BoolPropInfo& Info = BoolProps[i];
-								if (TagBat.Offset == Info.PropOffset && IsA(Info.ClassName))
-								{
-									const CPropInfo* Prop2 = FindProperty(Info.PropName);
-									if (Prop2)
-									{
-										byte* value = (byte*)ObjectData + Prop2->Offset;
-										bool b = (BoolValue & Info.PropMask) != 0;
-										*value = (byte)b;
-										PROP_DBG("B4 %s=%d\n", Info.PropName, b);
-									}
-									break;
-								}
-							}
-						}
-					}
-					break;
-
-				case NAME_IntProperty:
-					Ar << PROP(int);
-					PROP_DBG("%d", PROP(int));
-					break;
-
-				case NAME_VectorProperty:
-					Ar << PROP(FVector);
-					PROP_DBG("%g %g %g", FVECTOR_ARG(PROP(FVector)));
-					break;
-
-				case NAME_RotatorProperty:
-					Ar << PROP(FRotator);
-					PROP_DBG("%d %d %d", FROTATOR_ARG(PROP(FRotator)));
-					break;
-
-				case 17: // NAME_GuidProperty
-					Ar << PROP(FGuid);
-					PROP_DBG("%s", "(guid)");
-					break;
-				}
-			}
-			continue;
-		}
-#endif // BATMAN
+		int PropTagPos = Ar.Tell();
 
 		Ar << Tag;
 		if (!Tag.IsValid())						// end marker
 			break;
 
-	read_property:
-		guard(ReadProperty);
-
-		const char *TypeName = "??";
-	#if BATMAN
-		if (Ar.Game >= GAME_Batman2 && Ar.Game <= GAME_Batman4) // copy-paste of code above
-		{
-			if (Tag.Type < 16)
-				TypeName = GetTypeName(Tag.Type);
-			else if (Tag.Type == 16)
-				TypeName = "ObjectNCRProperty";
-			else if (Tag.Type == 17)
-				TypeName = "GuidProperty";
-		}
-		else
-	#endif // BATMAN
-		{
-			TypeName = GetTypeName(Tag.Type);
-		}
+		ReadUnrealProperty(Ar, Tag, ObjectData, PropTagPos);
+	}
 
 #if DEBUG_PROPS
-		appPrintf("-- %s \"%s::%s\" [%d] size=%d enum=%s struc=%s\n", TypeName, Name, *Tag.Name,
-			Tag.ArrayIndex, Tag.DataSize, *Tag.EnumName, *Tag.StrucName);
+	appPrintf("<<< End of struct: %s\n", Name);
+#endif
+
+	unguard;
+}
+
+
+void CTypeInfo::ReadUnrealProperty(FArchive& Ar, FPropertyTag& Tag, void* ObjectData, int PropTagPos) const
+{
+	guard(CTypeInfo::ReadUnrealProperty);
+
+	const char* DbgTypeName = "??";
+#if BATMAN
+	if (Ar.Game >= GAME_Batman2 && Ar.Game <= GAME_Batman4) // copy-paste of code above
+	{
+		if (Tag.Type < 16)
+			DbgTypeName = GetTypeName(Tag.Type);
+		else if (Tag.Type == 16)
+			DbgTypeName = "ObjectNCRProperty";
+		else if (Tag.Type == 17)
+			DbgTypeName = "GuidProperty";
+	}
+	else
+#endif // BATMAN
+	{
+		DbgTypeName = GetTypeName(Tag.Type);
+	}
+
+#if DEBUG_PROPS
+	appPrintf("-- %s \"%s::%s\" [%d] size=%d enum=%s struc=%s\n", DbgTypeName, Name, *Tag.Name,
+		Tag.ArrayIndex, Tag.DataSize, *Tag.EnumName, *Tag.StrucName);
 #endif // DEBUG_PROPS
 
-		int StopPos = Ar.Tell() + Tag.DataSize;	// for verification
+	int StopPos = Ar.Tell() + Tag.DataSize;	// for verification
 
 		// remove spaces from tags and stop at first underscore
 		char buf[2000] = {0};
@@ -1125,174 +1039,185 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 			if (!Prop)
 				appPrintf("WARNING: %s \"%s::%s\" was not found\n", TypeName, Name, *Tag.Name);
 #if DEBUG_PROPS
-			appPrintf("  (skipping %s)\n", *Tag.Name);
+		appPrintf("  (skipping %s)\n", *Tag.Name);
 #endif
-		skip_property:
-			if (Tag.Type == NAME_BoolProperty && Tag.DataSize != 0)
-			{
-				// BoolProperty has everything in FPropertyTag, but sometimes it has DataSize==4, what
-				// causes error when trying to skip it. This is why we have a separate code here.
-				appPrintf("WARNING: skipping BoolProperty %s with Tag.Size=%d\n", *Tag.Name, Tag.DataSize);
-				continue;
-			}
-			// skip property data
-			Ar.Seek(StopPos);
-			// serialize other properties
-			continue;
-		}
-		// verify array index
-		if (Tag.Type == NAME_ArrayProperty)
+	skip_property:
+		if (Tag.Type == NAME_BoolProperty && Tag.DataSize != 0)
 		{
-			if (!(Prop->Count == -1 && Tag.ArrayIndex == 0))
-			{
-				appPrintf("ERROR: Struct \"%s\": %s %s has Prop.Count=%d (should be -1) and ArrayIndex=%d (should be 0). Skipping property.\n",
-					Name, Prop->TypeName, Prop->Name, Prop->Count, Tag.ArrayIndex);
-				goto skip_property;
-			}
+			// BoolProperty has everything in FPropertyTag, but sometimes it has DataSize==4, what
+			// causes error when trying to skip it. This is why we have a separate code here.
+			appPrintf("WARNING: skipping BoolProperty %s with Tag.Size=%d\n", *Tag.Name, Tag.DataSize);
+			return;
 		}
-		else if (Tag.ArrayIndex < 0 || Tag.ArrayIndex >= Prop->Count)
+		// skip property data
+		Ar.Seek(StopPos);
+		// serialize other properties
+		return;
+	}
+
+	// verify array index
+	if (Tag.Type == NAME_ArrayProperty)
+	{
+		if (!(Prop->Count == -1 && Tag.ArrayIndex == 0))
 		{
-			appError("Struct \"%s\": %s %s[%d]: invalid index %d",
+			appPrintf("ERROR: Struct \"%s\": %s %s has Prop.Count=%d (should be -1) and ArrayIndex=%d (should be 0). Skipping property.\n",
 				Name, Prop->TypeName, Prop->Name, Prop->Count, Tag.ArrayIndex);
+			goto skip_property;
 		}
-		byte *value = (byte*)ObjectData + Prop->Offset;
+	}
+	else if (Tag.ArrayIndex < 0 || Tag.ArrayIndex >= Prop->Count)
+	{
+		appError("Struct \"%s\": %s %s[%d]: invalid index %d",
+			Name, Prop->TypeName, Prop->Name, Prop->Count, Tag.ArrayIndex);
+	}
+	byte *value = (byte*)ObjectData + Prop->Offset;
 
-#define CHECK_TYPE(name) \
-	if (strcmp(Prop->TypeName, name)) \
-		appError("Property %s expected type %s but read %s", *Tag.Name, name, Prop->TypeName)
+// If we'll put PropType namespace values into .cpp, we'll have identical constants, so we could
+// simply use (TypeField == Constant). However this breaks compile-time creation of CTypeInfo
+// property lists, they will be created at runtime. So, let's use strcmp at runtime instead.
+#define COMPARE_TYPE(TypeField, Constant)	( strcmp(TypeField, Constant) == 0 )
 
-		int ArrayIndex = Tag.ArrayIndex;
-		switch (Tag.Type)
-		{
-		case NAME_ByteProperty:
+#define CHECK_TYPE(TypeConst) \
+	if (!COMPARE_TYPE(Prop->TypeName, TypeConst)) \
+		appError("Property %s expected type %s but read %s", *Tag.Name, TypeConst, Prop->TypeName)
+
+	int ArrayIndex = Tag.ArrayIndex;
+	switch (Tag.Type)
+	{
+	case NAME_ByteProperty:
 #if UNREAL3
-			if (Tag.DataSize != 1)
+		if (Tag.DataSize != 1)
+		{
+			// modern UE3 enum saved as FName
+			assert(Tag.DataSize == 8);
+			FName EnumValue;
+			Ar << EnumValue;
+			if (Prop->TypeName[0] == '#')
 			{
-				// modern UE3 enum saved as FName
-				assert(Tag.DataSize == 8);
-				FName EnumValue;
-				Ar << EnumValue;
-				if (Prop->TypeName[0] == '#')
-				{
-					int tmpInt = NameToEnum(Prop->TypeName+1, *EnumValue);
-					if (tmpInt == ENUM_UNKNOWN)
-						appNotify("unknown member %s of enum %s", *EnumValue, Prop->TypeName+1);
-					assert(tmpInt >= 0 && tmpInt <= 255);
-					*value = tmpInt;
-					PROP_DBG("%s", *EnumValue);
-				}
-				else
-				{
-					// error: this property is not marked using PROP_ENUM2
-					CHECK_TYPE("byte");
-					appNotify("EnumProp: %s = %s\n", *Tag.Name, *EnumValue);
-//					PROP_DBG("%s", PROP(byte));
-				}
+				int tmpInt = NameToEnum(Prop->TypeName+1, *EnumValue);
+				if (tmpInt == ENUM_UNKNOWN)
+					appNotify("unknown member %s of enum %s", *EnumValue, Prop->TypeName+1);
+				assert(tmpInt >= 0 && tmpInt <= 255);
+				*value = tmpInt;
+				PROP_DBG("%s", *EnumValue);
 			}
 			else
-#endif // UNREAL3
 			{
-				if (Prop->TypeName[0] != '#')
-				{
-					CHECK_TYPE("byte");
-				}
-				Ar << PROP(byte);
-				PROP_DBG("%d", PROP(byte));
+				// error: this property is not marked using PROP_ENUM2
+				CHECK_TYPE(PropType::Byte);
+				appNotify("EnumProp: %s = %s\n", *Tag.Name, *EnumValue);
+//				PROP_DBG("%s", PROP(byte));
 			}
-			break;
-
-		case NAME_IntProperty:
-			CHECK_TYPE("int");
-			Ar << PROP(int);
-			PROP_DBG("%d", PROP(int));
-			break;
-
-		case NAME_BoolProperty:
-			CHECK_TYPE("bool");
-			PROP(bool) = Tag.BoolValue != 0;
-			PROP_DBG("%s", PROP(bool) ? "true" : "false");
-			break;
-
-		case NAME_FloatProperty:
-			CHECK_TYPE("float");
-			Ar << PROP(float);
-			PROP_DBG("%g", PROP(float));
-			break;
-
-		case NAME_ObjectProperty:
-			CHECK_TYPE("UObject*");
-			Ar << PROP(UObject*);
-			PROP_DBG("%s", PROP(UObject*) ? PROP(UObject*)->Name : "Null");
-			break;
-
-		case NAME_NameProperty:
-			CHECK_TYPE("FName");
-			Ar << PROP(FName);
-			PROP_DBG("%s", *PROP(FName));
-			break;
-
-		case NAME_ClassProperty:
-			appError("Class property is not implemented");
-			break;
-
-		case NAME_ArrayProperty:
+		}
+		else
+#endif // UNREAL3
+		{
+			if (Prop->TypeName[0] != '#')
 			{
+				CHECK_TYPE(PropType::Byte);
+			}
+			Ar << PROP(byte);
+			PROP_DBG("%d", PROP(byte));
+		}
+		break;
+
+	case NAME_IntProperty:
+		CHECK_TYPE(PropType::Int);
+		Ar << PROP(int);
+		PROP_DBG("%d", PROP(int));
+		break;
+
+	case NAME_BoolProperty:
+		CHECK_TYPE(PropType::Bool);
+		PROP(bool) = Tag.BoolValue != 0;
+		PROP_DBG("%s", PROP(bool) ? "true" : "false");
+		break;
+
+	case NAME_FloatProperty:
+		CHECK_TYPE(PropType::Float);
+		Ar << PROP(float);
+		PROP_DBG("%g", PROP(float));
+		break;
+
+	case NAME_ObjectProperty:
+		CHECK_TYPE(PropType::UObject);
+		Ar << PROP(UObject*);
+		PROP_DBG("%s", PROP(UObject*) ? PROP(UObject*)->Name : "Null");
+		break;
+
+	case NAME_NameProperty:
+		CHECK_TYPE(PropType::FName);
+		Ar << PROP(FName);
+		PROP_DBG("%s", *PROP(FName));
+		break;
+
+	case NAME_ClassProperty:
+		appError("Class property is not implemented");
+		break;
+
+	case NAME_ArrayProperty:
+		{
 #if DEBUG_PROPS
-				appPrintf("  %s[] = {\n", *Tag.Name);
+			appPrintf("  %s[] = {\n", *Tag.Name);
 #endif
-				FArray *Arr = (FArray*)value;
-#define SIMPLE_ARRAY_TYPE(type) \
-		if (!strcmp(Prop->TypeName, #type)) { Ar << *(TArray<type>*)Arr; }
-				SIMPLE_ARRAY_TYPE(int)
-				else SIMPLE_ARRAY_TYPE(bool)
-				else SIMPLE_ARRAY_TYPE(byte)
-				else SIMPLE_ARRAY_TYPE(float)
-				else SIMPLE_ARRAY_TYPE(UObject*)
-				else SIMPLE_ARRAY_TYPE(FName)
-				else SIMPLE_ARRAY_TYPE(FVector)
-				else SIMPLE_ARRAY_TYPE(FQuat)
-#undef SIMPLE_ARRAY_TYPE
-				else
-				{
-					// Read data count like generic TArray serializer does
-					int32 DataCount;
+			FArray *Arr = (FArray*)value;
+
+#define SIMPLE_ARRAY_TYPE(TypeConst, CppType) \
+		if (COMPARE_TYPE(Prop->TypeName, TypeConst)) { Ar << *(TArray<CppType>*)Arr; }
+
+			SIMPLE_ARRAY_TYPE(PropType::Int, int)
+			else SIMPLE_ARRAY_TYPE(PropType::Bool, bool)
+			else SIMPLE_ARRAY_TYPE(PropType::Byte, byte)
+			else SIMPLE_ARRAY_TYPE(PropType::Float, float)
+			else SIMPLE_ARRAY_TYPE(PropType::UObject, UObject*)
+			else SIMPLE_ARRAY_TYPE(PropType::FName, FName)
+			else SIMPLE_ARRAY_TYPE(PropType::FVector, FVector)
+			else SIMPLE_ARRAY_TYPE("FQuat", FQuat)
+			else
+			{
+				// Read data count like generic TArray serializer does
+				int32 DataCount;
 #if UC2
-					if (Ar.Engine() == GAME_UE2X && Ar.ArVer >= 145)
-					{
-						Ar << DataCount;
-					}
-					else
+				if (Ar.Engine() == GAME_UE2X && Ar.ArVer >= 145)
+				{
+					Ar << DataCount;
+				}
+				else
 #endif // UC2
 #if UNREAL3
-					if (Ar.Engine() >= GAME_UE3)
-					{
-						Ar << DataCount;
-					}
-					else
+				if (Ar.Engine() >= GAME_UE3)
+				{
+					Ar << DataCount;
+				}
+				else
 #endif // UNREAL3
-					{
-						// UE1 and UE2 code
-						Ar << AR_INDEX(DataCount);
-					}
-#if UNREAL4
-					if (Ar.Engine() >= GAME_UE4_BASE && Ar.ArVer >= VER_UE4_INNER_ARRAY_TAG_INFO)
-					{
-						// Serialize InnerTag, used for some verification
-						FPropertyTag InnerTag;
-						Ar << InnerTag;
-					}
-#endif // UNREAL4
+				{
+					// UE1 and UE2 code
+					Ar << AR_INDEX(DataCount);
+				}
+	#if UNREAL4
+				if (Ar.Engine() >= GAME_UE4_BASE && Ar.ArVer >= VER_UE4_INNER_ARRAY_TAG_INFO)
+				{
+					// Serialize InnerTag, used for some verification
+					FPropertyTag InnerTag;
+					Ar << InnerTag;
+				}
+	#endif // UNREAL4
 
-					//!! note: some structures should be serialized using SerializeStruc() (FVector etc)
-					// Find data typeinfo
-					const CTypeInfo *ItemType = FindStructType(Prop->TypeName);
-					if (!ItemType)
-						appError("Unknown structure type %s", Prop->TypeName);
+				// Find data typeinfo
+				//!! note: some structures should be serialized using SerializeStruc() (FVector etc)
+				const CTypeInfo *ItemType = FindStructType(Prop->TypeName);
+				if (!ItemType)
+				{
+					appPrintf("WARNING: structure type %s is unknown, skipping array %s::%s\n", Prop->TypeName, Name, Prop->Name);
+				}
+				else if (DataCount)
+				{
 					// Prepare array
 					Arr->Empty(DataCount, ItemType->SizeOf);
 					Arr->InsertZeroed(0, DataCount, ItemType->SizeOf);
 
-#if UNREAL4
+	#if UNREAL4
 					// Second queue of "simple serializers", but with InnerTag in UE4.12+
 					if (!stricmp(Prop->TypeName, "FLinearColor"))
 					{
@@ -1302,15 +1227,15 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 							Ar << *p++;
 					}
 					else
-#endif // UNREAL4
+	#endif // UNREAL4
 					{
 						// Serialize items
 						byte *item = (byte*)Arr->GetData();
 						for (int i = 0; i < DataCount; i++, item += ItemType->SizeOf)
 						{
-#if DEBUG_PROPS
+	#if DEBUG_PROPS
 							appPrintf("Item[%d]:\n", i);
-#endif
+	#endif
 							if (ItemType->Constructor)
 								ItemType->Constructor(item);		// fill default properties
 							else
@@ -1337,66 +1262,257 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
 	#endif
 							StopPos = Pos;
 						}
+					}
 #endif // 1 -- end of fix
-					}
 				}
-#if DEBUG_PROPS
-				appPrintf("  } // count=%d\n", Arr->Num());
-#endif
 			}
-			break;
+#if DEBUG_PROPS
+			appPrintf("  } // count=%d\n", Arr->Num());
+#endif
+		}
+		break;
 
-		case NAME_StructProperty:
-			{
+	case NAME_StructProperty:
+		{
 #if MKVSDC
-				if (Ar.Game == GAME_MK && Ar.ArVer >= 677 && (*Tag.StrucName)[0] == 'F')
-					Tag.StrucName.Str++;		// Tag.StrucName points to 'FStrucName' instead of 'StrucName'
+			if (Ar.Game == GAME_MK && Ar.ArVer >= 677 && (*Tag.StrucName)[0] == 'F')
+				Tag.StrucName.Str++;		// Tag.StrucName points to 'FStrucName' instead of 'StrucName'
 #endif // MKVSDC
-				if (stricmp(Prop->TypeName+1, *Tag.StrucName) != 0 && stricmp(*Tag.StrucName, "None") != 0) // Tag.StrucName could be unknown in Batman2
-				{
-					appNotify("Struc property %s expected type %s but read %s", *Tag.Name, Prop->TypeName, *Tag.StrucName);
-					Ar.Seek(StopPos);
-				}
-				else if (SerializeStruc(Ar, value, Tag.ArrayIndex, Prop->TypeName))
-				{
-					PROP_DBG("(struct:%s)", *Tag.StrucName);
-					int Pos = Ar.Tell();
-					if (Pos > StopPos)
-					{
-#if DEBUG_PROPS
-						appNotify("%s.%s: bad size (%d byte less) for struct property", Name, *Tag.Name, Pos - StopPos);
-#endif
-						StopPos = Pos;
-					}
-				}
-				else
-				{
-					//!! implement this (use FindStructType()->SerializeUnrealProps())
-					appNotify("WARNING: Unknown structure type: %s", *Tag.StrucName);
-					Ar.Seek(StopPos);
-				}
-			}
-			break;
-
-		case NAME_StrProperty:
-			if (!stricmp(Prop->TypeName, "FName"))
+			if (stricmp(Prop->TypeName+1, *Tag.StrucName) != 0 && stricmp(*Tag.StrucName, "None") != 0) // Tag.StrucName could be unknown in Batman2
 			{
-				// serialize FString to FName
-				// MK X, "TextureFileCacheName": UE3 has it as FName, but MK X as FString
-				FString tmpStr;
-				Ar << tmpStr;
-				PROP(FName) = *tmpStr;
-				PROP_DBG("%s", *PROP(FName));
+				appNotify("Struc property %s expected type %s but read %s", *Tag.Name, Prop->TypeName, *Tag.StrucName);
+				Ar.Seek(StopPos);
+			}
+			else if (SerializeStruc(Ar, value, Tag.ArrayIndex, Prop->TypeName))
+			{
+				PROP_DBG("(struct:%s)", *Tag.StrucName);
+				int Pos = Ar.Tell();
+				if (Pos > StopPos)
+				{
+#if DEBUG_PROPS
+					appNotify("%s.%s: bad size (%d byte less) for struct property", Name, *Tag.Name, Pos - StopPos);
+#endif
+					StopPos = Pos;
+				}
 			}
 			else
 			{
-				// serialize FString
-				CHECK_TYPE("FString");
-				Ar << PROP(FString);
-				PROP_DBG("%s", *PROP(FString));
+				//!! implement this (use FindStructType()->SerializeUnrealProps())
+				appNotify("WARNING: Unknown structure type: %s", *Tag.StrucName);
+				Ar.Seek(StopPos);
+			}
+		}
+		break;
+
+	case NAME_StrProperty:
+		if (COMPARE_TYPE(Prop->TypeName, PropType::FName))
+		{
+			// serialize FString to FName
+			// MK X, "TextureFileCacheName": UE3 has it as FName, but MK X as FString
+			FString tmpStr;
+			Ar << tmpStr;
+			PROP(FName) = *tmpStr;
+			PROP_DBG("%s", *PROP(FName));
+		}
+		else
+		{
+			// serialize FString
+			CHECK_TYPE(PropType::FString);
+			Ar << PROP(FString);
+			PROP_DBG("%s", *PROP(FString));
+		}
+		break;
+
+	case NAME_MapProperty:
+		appError("Map property not implemented");
+		break;
+
+	case NAME_FixedArrayProperty:
+		appError("FixedArray property not implemented");
+		break;
+
+#if UNREAL4
+	case NAME_EnumProperty:
+		{
+			FName EnumValue;
+			Ar << EnumValue;
+			assert(Prop->TypeName[0] == '#')
+			int tmpInt = NameToEnum(Prop->TypeName+1, *EnumValue);
+			if (tmpInt == ENUM_UNKNOWN)
+				appNotify("unknown member %s of enum %s", *EnumValue, Prop->TypeName+1);
+			assert(tmpInt >= 0 && tmpInt <= 255);
+			*value = tmpInt;
+			PROP_DBG("%s", *EnumValue);
+		}
+		break;
+#endif // UNREAL4
+
+	// reserved, but not implemented in unreal:
+	case NAME_StringProperty:	//------  string  => used str
+	case NAME_VectorProperty:	//------  vector  => used structure"Vector"
+	case NAME_RotatorProperty:	//------  rotator => used structure"Rotator"
+#if BATMAN
+		if (Ar.Game == GAME_Batman3)
+		{
+			if (Tag.Type == NAME_VectorProperty)
+			{
+				FVector& prop = PROP(FVector);
+				Ar << prop;
+				PROP_DBG("%g %g %g", prop.X, prop.Y, prop.Z);
+				break;
+			}
+			else if (Tag.Type == NAME_RotatorProperty)
+			{
+				FRotator& prop = PROP(FRotator);
+				Ar << prop;
+				PROP_DBG("%g %g %g", prop.Yaw, prop.Pitch, prop.Roll);
+				break;
+			}
+		}
+#endif // BATMAN
+		appError("Unknown property type %d, name %s", Tag.Type, *Tag.Name);
+		break;
+	}
+	// verification
+	int Pos = Ar.Tell();
+	if (Pos != StopPos)
+	{
+#if DEBUG_PROPS
+		appPrintf("Serialized size mismatch: Pos=%X, Stop=%X\n", Pos, StopPos);
+		// show property dump
+		Ar.Seek(PropTagPos);
+		DUMP_ARC_BYTES(Ar, StopPos - PropTagPos, "Property bytes");
+#endif
+		appError("%s\'%s\'.%s: Property read error: %d unread bytes", Name, UObject::GLoadingObj->Name, *Tag.Name, StopPos - Pos);
+	}
+
+	unguardf("(%s.%s, Type=%d, Size=%d, TagPos=%X)", Name, *Tag.Name, Tag.Type, Tag.DataSize, PropTagPos);
+}
+
+
+#if BATMAN
+
+void CTypeInfo::SerializeBatmanProps(FArchive& Ar, void* ObjectData) const
+{
+	guard(CTypeInfo::SerializeBatmanProps);
+
+	// property list
+	while (true)
+	{
+		// Batman 2 has more compact FPropertyTag implementation which uses serialization
+		// by offset, not by name - this should work faster (in game) and use less disk space.
+		int PropTagPos = Ar.Tell();
+		FPropertyTagBat2 TagBat;
+		Ar << TagBat;
+		if (!TagBat.Type)			// end marker
+			break;
+
+#if DEBUG_PROPS
+		const char *TypeName = "??";
+		if (TagBat.Type < 16)
+			TypeName = GetTypeName(TagBat.Type);
+		else if (TagBat.Type == 16)
+			TypeName = "ObjectNCRProperty";
+		else if (TagBat.Type == 17)
+			TypeName = "GuidProperty";
+		appPrintf("Prop: type=%d (%s) offset=0x%X size=%d propName=%s\n", TagBat.Type, TypeName, TagBat.Offset, TagBat.DataSize, *TagBat.PropertyName);
+#endif // DEBUG_PROPS
+		if (stricmp(TagBat.PropertyName, "None") != 0)
+		{
+			// Property has extra information, it should be serialized as in original engine.
+			// Convert tag to the standard format.
+			FPropertyTag UnrealTag;
+			UnrealTag.Name       = TagBat.PropertyName;
+			UnrealTag.Type       = TagBat.Type;
+			UnrealTag.DataSize   = TagBat.DataSize;
+			UnrealTag.ArrayIndex = TagBat.ArrayIndex;
+			UnrealTag.BoolValue  = TagBat.BoolValue;
+			ReadUnrealProperty(Ar, UnrealTag, ObjectData, PropTagPos);
+			continue;
+		}
+
+		static byte Dummy[16];
+		byte *value = Dummy;
+		const int ArrayIndex = 0;	// used in PROP macro
+		FPropertyTag Tag;			// the variable name 'Tag' used in PROP_DBG
+		if (FindPropBat2(this, TagBat, Tag, Ar.Game))
+		{
+			const CPropInfo *Prop = FindProperty(Tag.Name);
+			if (Prop)
+				value = (byte*)ObjectData + Prop->Offset;
+		}
+
+		// offset-based ("simple property") serialization
+		switch (TagBat.Type)
+		{
+		case NAME_FloatProperty:
+			Ar << PROP(float);
+			PROP_DBG("%g", PROP(float));
+			break;
+
+		case NAME_NameProperty:
+			Ar << PROP(FName);
+			PROP_DBG("%s", *PROP(FName));
+			break;
+
+		case NAME_StrProperty:
+			{
+				//!! implement (needs inplace constructor/destructor, will not work for Dummy[])
+				FString s;
+				Ar << s;
+//				appPrintf("... value = %s\n", *s);
 			}
 			break;
 
+		case 16: // NAME_ObjectNCRProperty
+			Ar << PROP(UObject*);
+			PROP_DBG("%s", PROP(UObject*) ? PROP(UObject*)->Name : "Null");
+			break;
+
+		case NAME_BoolProperty:
+			{
+				int BoolValue;
+				Ar << BoolValue;
+				PROP(bool) = (BoolValue != 0);
+				PROP_DBG("%08X", BoolValue);
+				// Ugly hack to support Batman4 bool properties
+				if (Ar.Game == GAME_Batman4)
+				{
+					struct BoolPropInfo
+					{
+						const char* ClassName;
+						const char* PropName;
+						uint16		PropOffset;
+						uint16		PropMask;
+					};
+					static const BoolPropInfo BoolProps[] =
+					{
+						{ "SkeletalMesh3", "bHasVertexColors", 0x528, 2 },
+						{ "AnimSet", "bAnimRotationOnly", 0x5C, 1 },
+					};
+					for (int i = 0; i < ARRAY_COUNT(BoolProps); i++)
+					{
+						const BoolPropInfo& Info = BoolProps[i];
+						if (TagBat.Offset == Info.PropOffset && IsA(Info.ClassName))
+						{
+							const CPropInfo* Prop2 = FindProperty(Info.PropName);
+							if (Prop2)
+							{
+								byte* value = (byte*)ObjectData + Prop2->Offset;
+								bool b = (BoolValue & Info.PropMask) != 0;
+								*value = (byte)b;
+								PROP_DBG("B4 %s=%d\n", Info.PropName, b);
+							}
+							break;
+						}
+					}
+				}
+			}
+			break;
+
+		case NAME_IntProperty:
+			Ar << PROP(int);
+			PROP_DBG("%d", PROP(int));
 		case NAME_MapProperty:
 			//appError("Map property not implemented");
             for (int i = 0; i < 5; i++) {
@@ -1412,75 +1528,452 @@ void CTypeInfo::SerializeUnrealProps(FArchive &Ar, void *ObjectData) const
             }
 			break;
 
-		case NAME_FixedArrayProperty:
-			appError("FixedArray property not implemented");
+		case NAME_VectorProperty:
+			Ar << PROP(FVector);
+			PROP_DBG("%g %g %g", FVECTOR_ARG(PROP(FVector)));
 			break;
 
-#if UNREAL4
-		case NAME_EnumProperty:
-			{
-				FName EnumValue;
-				Ar << EnumValue;
-				assert(Prop->TypeName[0] == '#')
-				int tmpInt = NameToEnum(Prop->TypeName+1, *EnumValue);
-				if (tmpInt == ENUM_UNKNOWN)
-					appNotify("unknown member %s of enum %s", *EnumValue, Prop->TypeName+1);
-				assert(tmpInt >= 0 && tmpInt <= 255);
-				*value = tmpInt;
-				PROP_DBG("%s", *EnumValue);
-			}
+		case NAME_RotatorProperty:
+			Ar << PROP(FRotator);
+			PROP_DBG("%d %d %d", FROTATOR_ARG(PROP(FRotator)));
 			break;
-#endif // UNREAL4
 
-		// reserved, but not implemented in unreal:
-		case NAME_StringProperty:	//------  string  => used str
-		case NAME_VectorProperty:	//------  vector  => used structure"Vector"
-		case NAME_RotatorProperty:	//------  rotator => used structure"Rotator"
-#if BATMAN
-			if (Ar.Game == GAME_Batman3)
-			{
-				if (Tag.Type == NAME_VectorProperty)
-				{
-					FVector& prop = PROP(FVector);
-					Ar << prop;
-					PROP_DBG("%g %g %g", prop.X, prop.Y, prop.Z);
-					break;
-				}
-				else if (Tag.Type == NAME_RotatorProperty)
-				{
-					FRotator& prop = PROP(FRotator);
-					Ar << prop;
-					PROP_DBG("%g %g %g", prop.Yaw, prop.Pitch, prop.Roll);
-					break;
-				}
-			}
-#endif // BATMAN
-			appError("Unknown property type %d, name %s", Tag.Type, *Tag.Name);
+		case 17: // NAME_GuidProperty
+			Ar << PROP(FGuid);
+			PROP_DBG("%s", "(guid)");
 			break;
 		}
-		// verification
-		int Pos = Ar.Tell();
-		if (Pos != StopPos)
-		{
-#if DEBUG_PROPS
-			appPrintf("Serialized size mismatch: Pos=%X, Stop=%X\n", Pos, StopPos);
-			// show property dump
-			Ar.Seek(PropTagPos);
-			DUMP_ARC_BYTES(Ar, StopPos - PropTagPos, "Property bytes");
-#endif
-			appError("%s\'%s\'.%s: Property read error: %d unread bytes", Name, UObject::GLoadingObj->Name, *Tag.Name, StopPos - Pos);
-		}
-
-		unguardf("(%s.%s, TagPos=%X)", Name, *Tag.Name, PropTagPos);
 	}
-
-#if DEBUG_PROPS
-	appPrintf("-- end of property list --\n");
-#endif
 
 	unguard;
 }
 
+#endif // BATMAN
+
+#if UNREAL4
+
+/*-----------------------------------------------------------------------------
+	UE4.26+ unversioned properties
+-----------------------------------------------------------------------------*/
+
+struct FUnversionedHeader
+{
+	struct FFragment
+	{
+		int SkipNum;
+		bool bHasAnyZeroes;
+		bool bIsLast;
+		uint8 ValueCount;
+
+		void Unpack(uint16 Packed)
+		{
+			SkipNum       =  Packed & 0x7f;
+			bHasAnyZeroes = (Packed & 0x80) != 0;
+			bIsLast       = (Packed & 0x100) != 0;
+			ValueCount    =  Packed >> 9;
+		}
+	};
+
+	// Serialized values
+	TArray<FFragment> Fragments;
+	TArray<uint8> ZeroMask;
+
+	// Values for property iteration
+	int CurrentPropIndex;
+	int CurrentFragmentIndex;
+	int PropsLeftInFragment;
+	int ZeroMaskIndex;
+	const FFragment* CurrentFragment;
+
+	void Load(FArchive& Ar)
+	{
+		guard(FUnversionedHeader::Load);
+
+		FFragment Fragment;
+		Fragment.bIsLast = false;
+		int ZeroMaskSize = 0;
+
+		while (!Fragment.bIsLast)
+		{
+			uint16 Packed;
+			Ar << Packed;
+			// Unpack data
+			Fragment.Unpack(Packed);
+			Fragments.Add(Fragment);
+			if (Fragment.bHasAnyZeroes)
+			{
+				ZeroMaskSize += Fragment.ValueCount;
+			}
+		#if DEBUG_PROPS
+			appPrintf("Frag: skip %d, %d props, zeros=%d, last=%d\n", Fragment.SkipNum, Fragment.ValueCount, Fragment.bHasAnyZeroes, Fragment.bIsLast);
+		#endif
+		}
+
+		if (ZeroMaskSize)
+		{
+			int NumBytes;
+			if (ZeroMaskSize <= 8)
+				NumBytes = 1;
+			else if (ZeroMaskSize <= 16)
+				NumBytes = 2;
+			else
+				NumBytes = ((ZeroMaskSize + 31) >> 5) * 4; // round to uint32 size
+			ZeroMask.SetNum(NumBytes);
+			Ar.Serialize(&ZeroMask[0], NumBytes);
+		}
+
+		// Initialize iterator
+		CurrentPropIndex = -0;
+		CurrentFragmentIndex = -1;
+		PropsLeftInFragment = 0;
+		ZeroMaskIndex = 0;
+		CurrentFragment = NULL;
+
+		unguard;
+	}
+
+	// Property iteration
+	bool GetNextProperty(int& PropIndex, bool& bIsZeroed)
+	{
+		guard(FUnversionedHeader::GetNextProperty);
+
+		// Switch to next fragment if needed
+		if (PropsLeftInFragment == 0)
+		{
+			while (true)
+			{
+				if (++CurrentFragmentIndex == Fragments.Num())
+				{
+					return false;
+				}
+				CurrentFragment = &Fragments[CurrentFragmentIndex];
+				CurrentPropIndex += CurrentFragment->SkipNum;
+				// There's a loop till fragment has any value, in a case that SkipNum doesn't fit 7 bits value
+				if (CurrentFragment->ValueCount > 0)
+				{
+					PropsLeftInFragment = CurrentFragment->ValueCount;
+					break;
+				}
+			}
+		}
+
+		if (CurrentFragment->bHasAnyZeroes)
+		{
+			bIsZeroed = (ZeroMask[ZeroMaskIndex >> 3] & (1 << (ZeroMaskIndex & 7))) != 0;
+			ZeroMaskIndex++;
+		}
+		else
+		{
+			bIsZeroed = false;
+		}
+
+		PropIndex = CurrentPropIndex++;
+		PropsLeftInFragment--;
+		return true;
+
+		unguard;
+	}
+};
+
+// References in UE4:
+// SerializeUnversionedProperties()
+//  -> FUnversionedHeader
+//  -> FUnversionedPropertySerializer
+//  -> FLinkWalkingSchemaIterator
+void CTypeInfo::SerializeUnversionedProperties4(FArchive& Ar, void* ObjectData) const
+{
+	guard(CTypeInfo::SerializeUnversionedProperties4);
+
+#undef PROP_DBG
+#if DEBUG_PROPS
+#	define PROP_DBG(fmt, ...) \
+		appPrintf("  %s[%d] = " fmt "\n", PropName, ArrayIndex, __VA_ARGS__);
+#else
+#	define PROP_DBG(fmt, ...)
+#endif
+
+	if (NativeSerializer)
+	{
+		guard(NativeSerializer);
+	#if DEBUG_PROPS
+		appPrintf(">>> Native: %s\n", Name);
+	#endif
+		NativeSerializer(Ar, ObjectData);
+		return;
+		unguard;
+	}
+
+#if DEBUG_PROPS
+	appPrintf(">>> Enter struct: %s\n", Name);
+	DUMP_ARC_BYTES(Ar, 32, "Header");
+#endif
+
+	FUnversionedHeader Header;
+	Header.Load(Ar);
+
+	int PropIndex;
+	bool bIsZeroedProp;
+	while (Header.GetNextProperty(PropIndex, bIsZeroedProp))
+	{
+	#if DEBUG_PROPS
+		appPrintf("Prop: %d (zeroed=%d)\n", PropIndex, bIsZeroedProp);
+	#endif
+		int ArrayIndex = 0;
+		const char* PropName = FindUnversionedProp(PropIndex, ArrayIndex);
+	#if DEBUG_PROPS
+		DUMP_ARC_BYTES(Ar, 32, "-> ...");
+	#endif
+		if (bIsZeroedProp)
+		{
+		#if DEBUG_PROPS
+			appPrintf("  skip zero prop %d (%s)\n", PropIndex, PropName);
+		#endif
+			continue;
+		}
+
+		if (!PropName)
+		{
+			// Skip the property as if it is int32 or float
+		#if DEBUG_PROPS
+			appPrintf("  unknown prop %d, skip as int32\n", PropIndex);
+		#endif
+			Ar.Seek(Ar.Tell() + 4);
+			continue;
+		}
+
+		if (PropName[0] == '#')
+		{
+		#if DEBUG_PROPS
+			appPrintf("  dropping %s\n", PropName + 1);
+		#endif
+			// Special marker, skipping property of known size
+			if (!strcmp(PropName, "#int8"))
+			{
+				Ar.Seek(Ar.Tell() + 1);
+			}
+			else if (!strcmp(PropName, "#int64"))
+			{
+				Ar.Seek(Ar.Tell() + 8);
+			}
+			else if (!strcmp(PropName, "#vec3"))
+			{
+				Ar.Seek(Ar.Tell() + 12);
+			}
+			else if (!strcmp(PropName, "#vec4"))
+			{
+				Ar.Seek(Ar.Tell() + 16);
+			}
+			else if (!strcmp(PropName, "#arr_int32"))
+			{
+				int32 Len;
+				Ar << Len;
+				if (Len > 0)
+					Ar.Seek(Ar.Tell() + Len * 4);
+			}
+			else
+			{
+				appError("Unknown marker: %s", PropName);
+			}
+			continue;
+		}
+
+		const CPropInfo* Prop = FindProperty(PropName);
+		if (!Prop) appError("Property not found: %s\n", PropName);
+
+		byte* value = (byte*)ObjectData + Prop->Offset; // used in PROP macro
+
+		if (Prop->Count == -1)
+		{
+			guard(HandleTArray);
+			// TArray
+			// Reference: SerializeStruc(Ar, value, Tag.ArrayIndex, Prop->TypeName))
+			// todo: try reusing code between versioned and unversioned properties
+			FArray* Arr = (FArray*)value;
+
+			bool bSerialized = true;
+			SIMPLE_ARRAY_TYPE(PropType::Int, int)
+			else SIMPLE_ARRAY_TYPE(PropType::Bool, bool)
+			else SIMPLE_ARRAY_TYPE(PropType::Byte, byte)
+			else SIMPLE_ARRAY_TYPE(PropType::Float, float)
+			else SIMPLE_ARRAY_TYPE(PropType::UObject, UObject*)
+			else SIMPLE_ARRAY_TYPE(PropType::FName, FName)
+			else SIMPLE_ARRAY_TYPE(PropType::FVector, FVector)
+			else SIMPLE_ARRAY_TYPE("FQuat", FQuat)
+			else bSerialized = false;
+			if (bSerialized)
+			{
+		#if DEBUG_PROPS
+				appPrintf("  %s[%d] {}\n", PropName, Arr->Num());
+		#endif
+				continue;
+			}
+
+			const CTypeInfo* ItemType = FindStructType(Prop->TypeName);
+			if (!ItemType)
+				appError("Unknown structure type %s", Prop->TypeName);
+
+			int32 DataCount;
+			Ar << DataCount;
+		#if DEBUG_PROPS
+			appPrintf("  %s[%d] = {\n", PropName, DataCount);
+		#endif
+
+			// Prepare array
+			Arr->Empty(DataCount, ItemType->SizeOf);
+			Arr->InsertZeroed(0, DataCount, ItemType->SizeOf);
+
+			// Serialize items
+			byte* Item = (byte*)Arr->GetData();
+			for (int i = 0; i < DataCount; i++, Item += ItemType->SizeOf)
+			{
+		#if DEBUG_PROPS
+				appPrintf("Item[%d]:\n", i);
+		#endif
+				if (ItemType->Constructor)
+					ItemType->Constructor(Item);		// fill default properties
+				else
+					memset(Item, 0, ItemType->SizeOf);	// no constructor, just initialize with zeros
+
+				ItemType->SerializeUnversionedProperties4(Ar, Item);
+			}
+		#if DEBUG_PROPS
+			appPrintf("  } // end of array\n", PropName, DataCount);
+		#endif
+			continue;
+			unguard;
+		}
+
+		if (Prop->Count == 0)
+		{
+			guard(HandleDrop);
+			// Handle PROP_DROP macro
+		#if DEBUG_PROPS
+			appPrintf("Drop %s\n", Prop->Name);
+		#endif
+			// Assume DROP_PROP without a type specifier
+			if (!Prop->TypeName ||
+				COMPARE_TYPE(Prop->TypeName, PropType::Int) ||
+				COMPARE_TYPE(Prop->TypeName, PropType::Float) ||
+				COMPARE_TYPE(Prop->TypeName, PropType::UObject))
+			{
+				Ar.Seek(Ar.Tell() + 4);
+			}
+			else if (COMPARE_TYPE(Prop->TypeName, PropType::Byte) ||
+				COMPARE_TYPE(Prop->TypeName, PropType::Bool))
+			{
+				Ar.Seek(Ar.Tell() + 1);
+			}
+			else if (COMPARE_TYPE(Prop->TypeName, PropType::FVector4))
+			{
+				Ar.Seek(Ar.Tell() + 16);
+			}
+			else if (COMPARE_TYPE(Prop->TypeName, PropType::FName))
+			{
+				Ar.Seek(Ar.Tell() + 8);
+			}
+			else if (COMPARE_TYPE(Prop->TypeName, PropType::FString))
+			{
+				int32 Len;
+				Ar << Len;
+				if (Len > 0)
+					Ar.Seek(Ar.Tell() + Len);
+				else if (Len < 0)
+					Ar.Seek(Ar.Tell() - Len * 2);
+			}
+			else
+			{
+				const CTypeInfo* ItemType = FindStructType(Prop->TypeName);
+				if (!ItemType)
+					appError("PROP_DROP(%s::%s) with unknown type %s", Name, Prop->Name, Prop->TypeName);
+			#if DEBUG_PROPS
+				appPrintf("  dropping struct %s\n", Prop->TypeName);
+			#endif
+				ItemType->SerializeUnversionedProperties4(Ar, NULL);
+			}
+			continue;
+			unguard;
+		}
+
+		guard(HandleSimpleProp);
+		assert(Prop->Count >= 1);
+
+		if (Prop->TypeName == NULL)
+		{
+			// Declared as PROP_DROP, consider int32 serializer
+	#if DEBUG_PROPS
+			appPrintf("  (skipping %s as int32)\n", PropName);
+	#endif
+			Ar.Seek(Ar.Tell() + 4);
+		}
+		else if (COMPARE_TYPE(Prop->TypeName, PropType::Bool))
+		{
+			Ar << PROP(byte); // 1-byte boolean (actually UE4 has cases for different bool sizes)
+			PROP_DBG("%d", PROP(int));
+		}
+		else if (COMPARE_TYPE(Prop->TypeName, PropType::Int))
+		{
+			Ar << PROP(int);
+			PROP_DBG("%d", PROP(int));
+		}
+		else if (COMPARE_TYPE(Prop->TypeName, PropType::Float))
+		{
+			Ar << PROP(float);
+			PROP_DBG("%g", PROP(float));
+		}
+		else if (COMPARE_TYPE(Prop->TypeName, PropType::UObject))
+		{
+			Ar << PROP(UObject*);
+			PROP_DBG("%s", PROP(UObject*) ? PROP(UObject*)->Name : "Null");
+		}
+		else if (COMPARE_TYPE(Prop->TypeName, PropType::FName))
+		{
+			Ar << PROP(FName);
+			PROP_DBG("%s", *PROP(FName));
+		}
+		//todo: use NATIVE_SERIALIZER!
+		else if (COMPARE_TYPE(Prop->TypeName, PropType::FString))
+		{
+			Ar << PROP(FString);
+			PROP_DBG("%s", *PROP(FString));
+		}
+		else if (COMPARE_TYPE(Prop->TypeName, PropType::FVector))
+		{
+			Ar << PROP(FVector);
+			PROP_DBG("%g %g %g", FVECTOR_ARG(PROP(FVector)));
+		}
+		else if (COMPARE_TYPE(Prop->TypeName, "FLinearColor"))
+		{
+			Ar << PROP(FLinearColor);
+			PROP_DBG("%g %g %g %g", FCOLOR_ARG(PROP(FLinearColor)));
+		}
+		else if (Prop->TypeName[0] == '#' && Prop->TypeName[1] == 'E')
+		{
+			// enum, serialize as byte
+			uint8& p = PROP(uint8);
+			Ar << p;
+		#if DEBUG_PROPS
+			const char* EnumName = EnumToName(Prop->TypeName + 1, p);
+			appPrintf("  %s = %d (enum %s::%s)\n", PropName, p, Prop->TypeName + 1, EnumName ? EnumName : "<unknown>");
+		#endif
+		}
+		else
+		{
+			const CTypeInfo* ItemType = FindStructType(Prop->TypeName);
+			if (!ItemType)
+				appError("Unknown property type %s (%s[%d] -> %s)\n", Prop->TypeName, Name, PropIndex, PropName);
+			ItemType->SerializeUnversionedProperties4(Ar, value + ArrayIndex * ItemType->SizeOf);
+		}
+		unguardf("Count=%d, Index=%d", Prop->Count, ArrayIndex);
+	}
+
+#if DEBUG_PROPS
+	appPrintf("<<< End of struct: %s\n", Name);
+#endif
+
+	unguardf("Type=%s", Name);
+}
+
+#endif // UNREAL4
 
 /*-----------------------------------------------------------------------------
 	UObject creation
@@ -1511,19 +2004,31 @@ UObject *CreateClass(const char *Name)
 	Typeinfo for Core classes
 -----------------------------------------------------------------------------*/
 
-BEGIN_PROP_TABLE_EXTERNAL(FVector)
+// Native serializers are defined in UE4 as "atomic" or "immutable" mark,
+// or with WithSerializer type trait.
+// reference: CoreUObject/Classes/Object.h
+// Modern UE4 native serializers are defined in CoreUObject/Private/UObject/Property.cpp
+
+BEGIN_PROP_TABLE_EXTERNAL_WITH_NATIVE_SERIALIZER(FVector)
 	PROP_FLOAT(X)
 	PROP_FLOAT(Y)
 	PROP_FLOAT(Z)
 END_PROP_TABLE_EXTERNAL
 
-BEGIN_PROP_TABLE_EXTERNAL(FRotator)
+BEGIN_PROP_TABLE_EXTERNAL_WITH_NATIVE_SERIALIZER(FQuat)
+	PROP_FLOAT(X)
+	PROP_FLOAT(Y)
+	PROP_FLOAT(Z)
+	PROP_FLOAT(W)
+END_PROP_TABLE_EXTERNAL
+
+BEGIN_PROP_TABLE_EXTERNAL_WITH_NATIVE_SERIALIZER(FRotator)
 	PROP_INT(Yaw)
 	PROP_INT(Pitch)
 	PROP_INT(Roll)
 END_PROP_TABLE_EXTERNAL
 
-BEGIN_PROP_TABLE_EXTERNAL(FColor)
+BEGIN_PROP_TABLE_EXTERNAL_WITH_NATIVE_SERIALIZER(FColor)
 	PROP_BYTE(R)
 	PROP_BYTE(G)
 	PROP_BYTE(B)
@@ -1532,7 +2037,7 @@ END_PROP_TABLE_EXTERNAL
 
 #if UNREAL3
 
-BEGIN_PROP_TABLE_EXTERNAL(FLinearColor)
+BEGIN_PROP_TABLE_EXTERNAL_WITH_NATIVE_SERIALIZER(FLinearColor)
 	PROP_FLOAT(R)
 	PROP_FLOAT(G)
 	PROP_FLOAT(B)
@@ -1549,7 +2054,17 @@ END_PROP_TABLE_EXTERNAL
 
 #if UNREAL4
 
-BEGIN_PROP_TABLE_EXTERNAL(FIntPoint)
+BEGIN_PROP_TABLE_EXTERNAL(FTransform)
+	PROP_STRUC(Rotation, FQuat)
+	PROP_VECTOR(Translation)
+	PROP_VECTOR(Scale3D)
+END_PROP_TABLE_EXTERNAL
+
+#endif // UNREAL4
+
+#if UNREAL4
+
+BEGIN_PROP_TABLE_EXTERNAL_WITH_NATIVE_SERIALIZER(FIntPoint)
 	PROP_INT(X)
 	PROP_INT(Y)
 END_PROP_TABLE_EXTERNAL
@@ -1560,6 +2075,7 @@ void RegisterCoreClasses()
 {
 	BEGIN_CLASS_TABLE
 		REGISTER_CLASS_EXTERNAL(FVector)
+		REGISTER_CLASS_EXTERNAL(FQuat)
 		REGISTER_CLASS_EXTERNAL(FRotator)
 		REGISTER_CLASS_EXTERNAL(FColor)
 	#if UNREAL3
@@ -1567,6 +2083,7 @@ void RegisterCoreClasses()
 		REGISTER_CLASS_EXTERNAL(FBoxSphereBounds)
 	#endif
 	#if UNREAL4
+		REGISTER_CLASS_EXTERNAL(FTransform)
 		REGISTER_CLASS_EXTERNAL(FIntPoint)
 	#endif
 	END_CLASS_TABLE

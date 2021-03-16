@@ -39,7 +39,7 @@ static void GetFullExportFileName(const FObjectExport &Exp, UnPackage *Package, 
 		if (*dst == '.') *dst = '/';
 	// and append class name as file extension
 	assert(*dst == 0);
-	const char *ClassName = Package->GetObjectName(Exp.ClassIndex);
+	const char *ClassName = Package->GetClassNameFor(Exp);
 	appSprintf(dst, bufSize - (dst - buf), ".%s", ClassName);
 }
 
@@ -47,7 +47,7 @@ static void GetFullExportFileName(const FObjectExport &Exp, UnPackage *Package, 
 static void GetFullExportName(const FObjectExport &Exp, UnPackage *Package, char *buf, int bufSize)
 {
 	// put class name
-	const char *ClassName = Package->GetObjectName(Exp.ClassIndex);
+	const char *ClassName = Package->GetClassNameFor(Exp);
 	appSprintf(buf, bufSize, "%s'", ClassName);
 	// get full path
 	char *dst = strchr(buf, 0);
@@ -71,6 +71,97 @@ static bool FilterClass(const char *ClassName)	//?? check logic: filter = pass o
 			return true;
 	}
 	return false;
+}
+
+// Attempts to evaluate the provided Key as hex string, does inplace replacement
+static void CheckHexAesKey(FString& Key)
+{
+#define ishex(c)		( (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') )
+#define hextodigit(c)	( (c >= 'a') ? c - 'a' + 10 : c - '0' )
+
+	if (Key.Len() < 3) return;
+	const char* s = *Key;
+
+	// Hex key starts with "0x"
+	if (*s++ != '0') return;
+	if (tolower(*s++) != 'x') return;
+
+	FStaticString<256> NewKey;
+	NewKey.Empty(Key.Len() / 2 + 1);
+
+	int remains = Key.Len() - 2;
+	if (remains & 1)
+	{
+		appErrorNoLog("Hexadecimal AES key contains odd number of characters");
+	}
+	while (remains > 0)
+	{
+		uint8 b = 0;
+		if ((remains & 1) == 0)
+		{
+			// this code will not be executed only in a case of odd character count, for the first char
+			char c = tolower(*s++);
+			if (!ishex(c))
+			{
+				appErrorNoLog("Illegal character in hexadecimal AES key");
+			}
+			b = hextodigit(c) << 4;
+			remains--;
+		}
+		char c = tolower(*s++);
+		if (!ishex(c))
+		{
+			appErrorNoLog("Illegal character in hexadecimal AES key");
+		}
+		b |= hextodigit(c);
+		remains--;
+
+		NewKey.AppendChar((char)b);
+	}
+
+	Key = NewKey;
+}
+
+static void HandleAesKeyOption(const char* value)
+{
+	FStaticString<256> Key = value;
+	if (Key.Len())
+	{
+		if (Key[0] == '@')
+		{
+			// Load a file with keys
+			const char* KeyFile = *Key + 1;
+			FILE* f = fopen(KeyFile, "r");
+			if (f)
+			{
+				char buffer[1024];
+				while (!feof(f))
+				{
+					if (fgets(buffer, ARRAY_COUNT(buffer), f))
+					{
+						FStaticString<256> Key = buffer;
+						Key.TrimStartAndEndInline();
+						if (!Key.IsEmpty())
+						{
+							CheckHexAesKey(Key);
+							GAesKeys.Add(Key);
+						}
+					}
+				}
+				fclose(f);
+			}
+			else
+			{
+				appPrintf("Warning: -aes option refers missing file %s\n", KeyFile);
+			}
+		}
+		else
+		{
+			Key.TrimStartAndEndInline();
+			CheckHexAesKey(Key);
+			GAesKeys.Add(Key);
+		}
+	}
 }
 
 
@@ -101,6 +192,8 @@ int main(int argc, char **argv)
 				"    -path=PATH      path to game installation directory; if not specified,\n"
 				"                    program will search for packages in current directory\n"
 				"    -game=tag       override game autodetection (see -taglist for variants)\n"
+				"    -aes=key        provide AES decryption key for encrypted pak files,\n"
+				"                    key is ASCII or hex string (hex format is 0xAABBCCDD)\n"
 				"    -filter=<value> add filter for output types\n"
 				"    -out=PATH       extract everything into PATH instead of the current directory\n"
 				"    -lzo|lzx|zlib   force compression method for fully-compressed packages\n"
@@ -178,6 +271,10 @@ int main(int argc, char **argv)
 			}
 			GForceGame = tag;
 		}
+		else if (!strnicmp(opt, "aes=", 4))
+		{
+			HandleAesKeyOption(opt+4);
+		}
 		else if (!stricmp(opt, "lzo"))
 			GForceCompMethod = COMPRESS_LZO;
 		else if (!stricmp(opt, "zlib"))
@@ -227,7 +324,7 @@ int main(int argc, char **argv)
 		for (idx = 0; idx < Package->Summary.ExportCount; idx++)
 		{
 			FObjectExport &Exp = Package->ExportTable[idx];
-			const char *ClassName = Package->GetObjectName(Exp.ClassIndex);
+			const char *ClassName = Package->GetClassNameFor(Exp);
 			if (!FilterClass(ClassName)) continue;
 			char objName[2048];
 			GetFullExportName(Exp, Package, ARRAY_ARG(objName));
@@ -255,7 +352,7 @@ int main(int argc, char **argv)
 	for (idx = 0; idx < Package->Summary.ExportCount; idx++)
 	{
 		FObjectExport &Exp = Package->ExportTable[idx];
-		const char *ClassName = Package->GetObjectName(Exp.ClassIndex);
+		const char *ClassName = Package->GetClassNameFor(Exp);
 		if (!FilterClass(ClassName)) continue;
 		// prepare file
 #if !MAKE_DIRS
@@ -280,7 +377,11 @@ int main(int argc, char **argv)
 		byte *data = new byte[Exp.SerialSize];
 		if (Exp.SerialSize)
 		{
+		#if 0
 			Package->Seek(Exp.SerialOffset);
+		#else
+			Package->SetupReader(idx);
+		#endif
 			Package->Serialize(data, Exp.SerialSize);
 		}
 #if !DISABLE_WRITE

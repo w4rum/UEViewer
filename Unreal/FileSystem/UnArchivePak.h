@@ -97,32 +97,20 @@ struct FPakEntry
 	}
 };
 
-inline bool PakRequireAesKey(bool fatal = true)
-{
-	if ((GAesKey.Len() == 0) && !UE4EncryptedPak())
-	{
-		if (fatal)
-			appErrorNoLog("AES key is required");
-		return false;
-	}
-	return true;
-}
+class FPakVFS;
 
 class FPakFile : public FArchive
 {
 	DECLARE_ARCHIVE(FPakFile, FArchive);
 public:
-	FPakFile(const FPakEntry* info, FArchive* reader)
+	FPakFile(const FPakEntry* info, FPakVFS* parent)
 	:	Info(info)
-	,	Reader(reader)
+	,	Parent(parent)
 	,	UncompressedBuffer(NULL)
+	,	IsFileOpen(true)
 	{}
 
-	virtual ~FPakFile()
-	{
-		if (UncompressedBuffer)
-			appFree(UncompressedBuffer);
-	}
+	virtual ~FPakFile();
 
 	virtual void Serialize(void *data, int size);
 
@@ -141,38 +129,34 @@ public:
 
 	virtual bool IsOpen() const
 	{
-		// Not really "open state", but rather indicate that there's something to clean up in Close()
-		return UncompressedBuffer != NULL;
+		return IsFileOpen;
 	}
 
-	virtual void Close()
-	{
-		if (UncompressedBuffer)
-		{
-			appFree(UncompressedBuffer);
-			UncompressedBuffer = NULL;
-		}
-	}
+	virtual void Close();
 
 	enum { EncryptionAlign = 16 }; // AES-specific constant
 	enum { EncryptedBufferSize = 256 }; //?? TODO: check - may be value 16 will be better for performance
 
 protected:
+	FPakVFS*	Parent;
 	const FPakEntry* Info;
-	FArchive*	Reader;
 	byte*		UncompressedBuffer;
 	int			UncompressedBufferPos;
+	bool		IsFileOpen;
 };
 
 
 class FPakVFS : public FVirtualFileSystem
 {
+	friend FPakFile;
+
 public:
 	FPakVFS(const char* InFilename)
 	:	Filename(InFilename)
 	,	Reader(NULL)
 //	,	HashTable(NULL)
 	,	NumEncryptedFiles(0)
+	,	NumOpenFiles(0)
 	{}
 
 	virtual ~FPakVFS()
@@ -181,17 +165,11 @@ public:
 //		if (HashTable) delete[] HashTable;
 	}
 
-	void CompactFilePath(FString& Path);
-
 	virtual bool AttachReader(FArchive* reader, FString& error);
 
-	virtual FArchive* CreateReader(int index)
-	{
-		guard(FPakVFS::CreateReader);
-		const FPakEntry& info = FileInfos[index];
-		return new FPakFile(&info, Reader);
-		unguard;
-	}
+	virtual FArchive* CreateReader(int index);
+
+	const FString& GetPakEncryptionKey() const;
 
 protected:
 	FString				Filename;
@@ -199,13 +177,23 @@ protected:
 	TArray<FPakEntry>	FileInfos;
 	FStaticString<MAX_PACKAGE_PATH> MountPoint;
 	int					NumEncryptedFiles;
+	int					NumOpenFiles;
+	FString				PakEncryptionKey;
 
-	void ValidateMountPoint(FString& MountPoint);
+	// Called when some FPakFile has been opened
+	void FileOpened();
+
+	// Called by FPakFile when it is destroyed
+	void FileClosed();
 
 	// UE4.24 and older
 	bool LoadPakIndexLegacy(FArchive* reader, const FPakInfo& info, FString& error);
 	// UE4.25 and newer
 	bool LoadPakIndex(FArchive* reader, const FPakInfo& info, FString& error);
+
+	bool DecryptPakIndex(TArray<byte>& IndexData, FString& ErrorString);
+
+	void DecryptDataBlock(byte* Data, int DataSize);
 
 #if 0
 	enum { HASH_SIZE = 1024 };

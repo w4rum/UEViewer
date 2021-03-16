@@ -622,25 +622,31 @@ void UAnimSet::ConvertAnims()
 #endif
 	int NumTracks = TrackBoneNames.Num();
 
-	AnimSet->AnimRotationOnly = bAnimRotationOnly;
-	if (UseTranslationBoneNames.Num())
+	if (UseTranslationBoneNames.Num() || ForceMeshTranslationBoneNames.Num())
 	{
-		AnimSet->UseAnimTranslation.AddZeroed(NumTracks);
-		for (i = 0; i < UseTranslationBoneNames.Num(); i++)
+		// Setup animation retargeting
+		AnimSet->BoneModes.Init(EBoneRetargetingMode::Mesh, NumTracks);
+		if (UseTranslationBoneNames.Num() && bAnimRotationOnly)
 		{
-			for (j = 0; j < TrackBoneNames.Num(); j++)
-				if (UseTranslationBoneNames[i] == TrackBoneNames[j])
-					AnimSet->UseAnimTranslation[j] = true;
+			for (i = 0; i < UseTranslationBoneNames.Num(); i++)
+			{
+				for (j = 0; j < TrackBoneNames.Num(); j++)
+					if (UseTranslationBoneNames[i] == TrackBoneNames[j])
+						AnimSet->BoneModes[j] = EBoneRetargetingMode::Animation;
+			}
 		}
-	}
-	if (ForceMeshTranslationBoneNames.Num())
-	{
-		AnimSet->ForceMeshTranslation.AddZeroed(NumTracks);
-		for (i = 0; i < ForceMeshTranslationBoneNames.Num(); i++)
+		if (ForceMeshTranslationBoneNames.Num())
 		{
-			for (j = 0; j < TrackBoneNames.Num(); j++)
-				if (ForceMeshTranslationBoneNames[i] == TrackBoneNames[j])
-					AnimSet->ForceMeshTranslation[j] = true;
+			// This array overrides bones set as "EBoneRetargetingMode::Animation" to use "Mesh" mode again.
+			// We're no longer storing this array in CAnimSet separately. Probably it is not good (for UE3 games),
+			// because in UE3 it was possible to set up AnimRotationOnly per mesh, or from AnimTree, so this
+			// setting wasn't global.
+			for (i = 0; i < ForceMeshTranslationBoneNames.Num(); i++)
+			{
+				for (j = 0; j < TrackBoneNames.Num(); j++)
+					if (ForceMeshTranslationBoneNames[i] == TrackBoneNames[j])
+						AnimSet->BoneModes[j] = EBoneRetargetingMode::Mesh;
+			}
 		}
 	}
 
@@ -697,7 +703,7 @@ void UAnimSet::ConvertAnims()
 #if TRANSFORMERS
 		if (ArGame == GAME_Transformers && Seq->Trans3Data.Num())
 		{
-			CAnimSequence *Dst = new CAnimSequence;
+			CAnimSequence *Dst = new CAnimSequence(Seq);
 			AnimSet->Sequences.Add(Dst);
 			Dst->Name      = Seq->SequenceName;
 			Dst->NumFrames = Seq->NumFrames;
@@ -718,7 +724,7 @@ void UAnimSet::ConvertAnims()
 #if BATMAN
 		if (ArGame >= GAME_Batman2 && ArGame <= GAME_Batman4 && Seq->AnimZip_Data.Num())
 		{
-			CAnimSequence *Dst = new CAnimSequence;
+			CAnimSequence *Dst = new CAnimSequence(Seq);
 			AnimSet->Sequences.Add(Dst);
 			Dst->Name      = Seq->SequenceName;
 			Dst->NumFrames = Seq->NumFrames;
@@ -746,7 +752,7 @@ void UAnimSet::ConvertAnims()
 		}
 
 		// create CAnimSequence
-		CAnimSequence *Dst = new CAnimSequence;
+		CAnimSequence *Dst = new CAnimSequence(Seq);
 		AnimSet->Sequences.Add(Dst);
 		Dst->Name      = Seq->SequenceName;
 		Dst->NumFrames = Seq->NumFrames;
@@ -756,7 +762,13 @@ void UAnimSet::ConvertAnims()
 		// bone tracks ...
 		Dst->Tracks.Empty(NumTracks);
 
-		FMemReader Reader(Seq->CompressedByteStream.GetData(), Seq->CompressedByteStream.Num());
+		// There could be an animation consisting of only trans with offsets == -1, what means
+		// use of RefPose. In this case there's no point adding the animation to AnimSet. We'll
+		// create FMemReader even for empty CompressedByteStream, otherwise it would be hard to
+		// create a valid CAnimSequence which won't crash animation export.
+		FMemReader Reader(
+			Seq->CompressedByteStream.Num() ? Seq->CompressedByteStream.GetData() : (const uint8*)"",
+			Seq->CompressedByteStream.Num());
 		Reader.SetupFrom(*Package);
 
 		bool HasTimeTracks = (Seq->KeyEncodingFormat == AKF_VariableKeyLerp);

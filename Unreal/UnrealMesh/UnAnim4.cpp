@@ -14,6 +14,8 @@
 //#define DEBUG_DECOMPRESS	1
 //#define DEBUG_SKELMESH	1
 //#define DEBUG_ANIM		1
+//#define DEBUG_RETARGET	1
+#define DEBUG_RETARGET_BONE	"r_brow_outer"
 
 // References in UE4 code: Engine/Public/AnimationCompression.h
 // - FAnimationCompression_PerTrackUtils
@@ -30,19 +32,49 @@ USkeleton::~USkeleton()
 	if (ConvertedAnim) delete ConvertedAnim;
 }
 
-static CVec3 GetBoneScale(FReferenceSkeleton& Skel, int BoneIndex)
+// Get the effective scale of the particular bone, with taking into account scales of the bone's parents
+static CVec3 GetBoneScale(const FReferenceSkeleton& Skel, const TArray<FTransform>& BoneTransforms, int BoneIndex)
 {
+	guard(GetBoneScale);
+
 	CVec3 Scale;
 	Scale.Set(1, 1, 1);
 
 	while (BoneIndex >= 0)
 	{
-		FVector BoneScale = Skel.RefBonePose[BoneIndex].Scale3D;
+		FVector BoneScale = BoneTransforms[BoneIndex].Scale3D;
+		// Accumulate the scale
 		Scale.Scale(CVT(BoneScale));
+		// Get the bone's parent
 		BoneIndex = Skel.RefBoneInfo[BoneIndex].ParentIndex;
 	}
 
 	return Scale;
+
+	unguard;
+}
+
+// Adjust array of bone transforms. Note that 'Transforms' array will be modified here, however only
+// 'Translation' part will be changed. Its 'Scale3D' field is used to compute the scale.
+static bool AdjustBoneScales(const FReferenceSkeleton& SkeletonHierarchy, TArray<FTransform>& Transforms)
+{
+	guard(AdjustBoneScales);
+
+	if (SkeletonHierarchy.RefBoneInfo.Num() != Transforms.Num())
+	{
+		return false;
+	}
+
+	for (int BoneIndex = 0; BoneIndex < Transforms.Num(); BoneIndex++)
+	{
+		CVec3 Scale = GetBoneScale(SkeletonHierarchy, Transforms, BoneIndex);
+		FTransform& Transform = Transforms[BoneIndex];
+		CVT(Transform.Translation).Scale(Scale);
+	}
+
+	return true;
+
+	unguard;
 }
 
 FArchive& operator<<(FArchive& Ar, FReferenceSkeleton& S)
@@ -88,16 +120,7 @@ FArchive& operator<<(FArchive& Ar, FReferenceSkeleton& S)
 #endif // DEBUG_SKELMESH
 
 	// Adjust skeleton's scale, if any. Use scale of the root bone.
-	if (NumBones > 0)
-	{
-		// Adjust other bones
-		for (int BoneIndex = 0; BoneIndex < NumBones; BoneIndex++)
-		{
-			FTransform& Transform = S.RefBonePose[BoneIndex];
-			CVec3 Scale = GetBoneScale(S, BoneIndex);
-			CVT(Transform.Translation).Scale(Scale);
-		}
-	}
+	AdjustBoneScales(S, S.RefBonePose);
 
 	return Ar;
 
@@ -218,9 +241,41 @@ void USkeleton::Serialize(FArchive &Ar)
 	if (Ar.ArVer >= VER_UE4_FIX_ANIMATIONBASEPOSE_SERIALIZATION)
 	{
 		Ar << AnimRetargetSources;
+#if DEBUG_RETARGET
+		appPrintf("Retarget sources: %d\n", AnimRetargetSources.Num());
+		for (int i = 0; i < AnimRetargetSources.Num(); i++)
+		{
+			appPrintf("  %d: %s\n", i, *AnimRetargetSources[i].Key);
+	#ifdef DEBUG_RETARGET_BONE
+			const FReferencePose& Pose = AnimRetargetSources[i].Value;
+			for (int j = 0; j < Pose.ReferencePose.Num(); j++)
+			{
+				if (ReferenceSkeleton.RefBoneInfo.IsValidIndex(j) &&
+					ReferenceSkeleton.RefBoneInfo[j].Name == DEBUG_RETARGET_BONE)
+				{
+					CVec3 BoneScale = GetBoneScale(ReferenceSkeleton, Pose.ReferencePose, j);
+					appPrintf("    %s: (%g %g %g) x (%g %g %g)\n", *ReferenceSkeleton.RefBoneInfo[j].Name, FVECTOR_ARG(Pose.ReferencePose[j].Translation), VECTOR_ARG(BoneScale));
+				}
+			}
+	#endif // DEBUG_RETARGET_BONE
+		}
+#endif
+		// Adjust scales of retarget pose bones
+		for (auto& It : AnimRetargetSources)
+		{
+			FReferencePose& Pose = It.Value;
+			guard(AdjustScalesForRetargetSource);
+			if (!AdjustBoneScales(ReferenceSkeleton, Pose.ReferencePose))
+			{
+				appPrintf("WARNING: AnimRetargetSources[%s] has wrong bone count %d (should be %d)",
+					*It.Key, Pose.ReferencePose.Num(), ReferenceSkeleton.RefBoneInfo.Num());
+			}
+			unguardf("%s", *It.Key);
+		}
 	}
 	else
 	{
+		// Pre-UE4.0 code
 		appPrintf("USkeleton has old AnimRetargetSources format, skipping\n");
 		DROP_REMAINING_DATA(Ar);
 		return;
@@ -267,35 +322,8 @@ void USkeleton::Serialize(FArchive &Ar)
 
 void USkeleton::PostLoad()
 {
-	guard(USkeleton::PostLoad);
-
-	// Create empty AnimSet if not yet created
+	// Create an empty AnimSet if not yet created
 	ConvertAnims(NULL);
-
-/*
-	// Gather all loaded UAnimSequence objects referencing this skeleton
-	const TArray<UnPackage*>& PackageMap = UnPackage::GetPackageMap();
-
-	for (int i = 0; i < PackageMap.Num(); i++)
-	{
-		UnPackage* p = PackageMap[i];
-		for (int j = 0; j < p->Summary.ExportCount; j++)
-		{
-			FObjectExport& Exp = p->ExportTable[j];
-			if (Exp.Object && Exp.Object->IsA("AnimSequence4"))
-			{
-				UAnimSequence4* Seq = (UAnimSequence4*)Exp.Object;
-				if (Seq->Skeleton == this)
-				{
-					Anims.Add(Seq);
-				}
-			}
-		}
-	}
-
-	ConvertAnims();
-*/
-	unguard;
 }
 
 
@@ -304,45 +332,6 @@ void USkeleton::PostLoad()
 #else
 #define DBG(...)
 #endif
-
-// position
-#define TP(Enum, VecType)						\
-				case Enum:						\
-					{							\
-						VecType v;				\
-						Reader << v;			\
-						A->KeyPos.Add(CVT(v));	\
-					}							\
-					break;
-// position ranged
-#define TPR(Enum, VecType)						\
-				case Enum:						\
-					{							\
-						VecType v;				\
-						Reader << v;			\
-						FVector v2 = v.ToVector(Mins, Ranges); \
-						A->KeyPos.Add(CVT(v2));	\
-					}							\
-					break;
-// rotation
-#define TR(Enum, QuatType)						\
-				case Enum:						\
-					{							\
-						QuatType q;				\
-						Reader << q;			\
-						A->KeyQuat.Add(CVT(q));	\
-					}							\
-					break;
-// rotation ranged
-#define TRR(Enum, QuatType)						\
-				case Enum:						\
-					{							\
-						QuatType q;				\
-						Reader << q;			\
-						FQuat q2 = q.ToQuat(Mins, Ranges); \
-						A->KeyQuat.Add(CVT(q2));\
-					}							\
-					break;
 
 static void ReadTimeArray(FArchive &Ar, int NumKeys, TArray<float> &Times, int NumFrames)
 {
@@ -382,34 +371,255 @@ static void ReadTimeArray(FArchive &Ar, int NumKeys, TArray<float> &Times, int N
 	unguard;
 }
 
+#define DECODE_PER_TRACK_INFO(info)									\
+			KeyFormat = (AnimationCompressionFormat)(info >> 28);	\
+			ComponentMask = (info >> 24) & 0xF;						\
+			NumKeys       = info & 0xFFFFFF;						\
+			HasTimeTracks = (ComponentMask & 8) != 0;
+
+// Compressed data decode helpers
+
+// position
+#define TP(Enum, VecType)						\
+				case Enum:						\
+					{							\
+						VecType v;				\
+						Reader << v;			\
+						A->KeyPos.Add(CVT(v));	\
+					}							\
+					break;
+// position ranged
+#define TPR(Enum, VecType, Array)				\
+				case Enum:						\
+					{							\
+						VecType v;				\
+						Reader << v;			\
+						FVector v2 = v.ToVector(Mins, Ranges); \
+						Array.Add(CVT(v2));		\
+					}							\
+					break;
+// rotation
+#define TR(Enum, QuatType, Array)				\
+				case Enum:						\
+					{							\
+						QuatType q;				\
+						Reader << q;			\
+						Array.Add(CVT(q));		\
+					}							\
+					break;
+// rotation ranged
+#define TRR(Enum, QuatType, Array)				\
+				case Enum:						\
+					{							\
+						QuatType q;				\
+						Reader << q;			\
+						FQuat q2 = q.ToQuat(Mins, Ranges); \
+						Array.Add(CVT(q2));		\
+					}							\
+					break;
+
+static void ReadPerTrackQuatData(FArchive& Reader, int TrackIndex, const char* TrackKind,
+	TArray<CQuat>& DstKeys, TArray<float>& DstTimeKeys, int NumFrames)
+{
+	guard(ReadPerTrackQuatData);
+
+	uint32 PackedInfo;
+	AnimationCompressionFormat KeyFormat;
+	int ComponentMask;
+	int NumKeys;
+	bool HasTimeTracks;
+
+	FVector Mins, Ranges;
+	static const CQuat nullQuat = { 0, 0, 0, 1 };
+
+	Reader << PackedInfo;
+	DECODE_PER_TRACK_INFO(PackedInfo);
+	DstKeys.Empty(NumKeys);
+	DBG("    [%d] %s: fmt=%d (%s), %d keys, mask %d\n", TrackIndex, TrackKind,
+		KeyFormat, EnumToName(KeyFormat), NumKeys, ComponentMask
+	);
+	if (KeyFormat == ACF_IntervalFixed32NoW)
+	{
+		// read mins/maxs
+		Mins.Set(0, 0, 0);
+		Ranges.Set(0, 0, 0);
+		if (ComponentMask & 1) Reader << Mins.X << Ranges.X;
+		if (ComponentMask & 2) Reader << Mins.Y << Ranges.Y;
+		if (ComponentMask & 4) Reader << Mins.Z << Ranges.Z;
+	}
+	for (int k = 0; k < NumKeys; k++)
+	{
+		switch (KeyFormat)
+		{
+		case ACF_None:
+		case ACF_Float96NoW:
+			{
+				FQuatFloat96NoW q;
+				Reader << q;
+				FQuat q2 = q;				// convert
+				DstKeys.Add(CVT(q2));
+			}
+			break;
+		case ACF_Fixed48NoW:
+			{
+				FQuatFixed48NoW q;
+				q.X = q.Y = q.Z = 32767;	// corresponds to 0
+				if (ComponentMask & 1) Reader << q.X;
+				if (ComponentMask & 2) Reader << q.Y;
+				if (ComponentMask & 4) Reader << q.Z;
+				FQuat q2 = q;				// convert
+				DstKeys.Add(CVT(q2));
+			}
+			break;
+		TR (ACF_Fixed32NoW, FQuatFixed32NoW, DstKeys)
+		TRR(ACF_IntervalFixed32NoW, FQuatIntervalFixed32NoW, DstKeys)
+		TR (ACF_Float32NoW, FQuatFloat32NoW, DstKeys)
+		case ACF_Identity:
+			DstKeys.Add(nullQuat);
+			break;
+		default:
+			appError("Unknown %s compression method: %d (%s)", TrackKind, KeyFormat, EnumToName(KeyFormat));
+		}
+	}
+	// align to 4 bytes
+	Reader.Seek(Align(Reader.Tell(), 4));
+	if (HasTimeTracks)
+		ReadTimeArray(Reader, NumKeys, DstTimeKeys, NumFrames);
+
+	unguard;
+}
+
+static void ReadPerTrackVectorData(FArchive& Reader, int TrackIndex, const char* TrackKind,
+	TArray<CVec3>& DstKeys, TArray<float>& DstTimeKeys, int NumFrames)
+{
+	guard(ReadPerTrackVectorData);
+
+	uint32 PackedInfo;
+	AnimationCompressionFormat KeyFormat;
+	int ComponentMask;
+	int NumKeys;
+	bool HasTimeTracks;
+
+	FVector Mins, Ranges;
+	static const CVec3 nullVec = { 0, 0, 0 };
+
+	Reader << PackedInfo;
+	DECODE_PER_TRACK_INFO(PackedInfo);
+	DstKeys.Empty(NumKeys);
+	DBG("    [%d] %s: fmt=%d (%s), %d keys, mask %d\n", TrackIndex, TrackKind,
+		KeyFormat, EnumToName(KeyFormat), NumKeys, ComponentMask
+	);
+	if (KeyFormat == ACF_IntervalFixed32NoW)
+	{
+		// read mins/maxs
+		Mins.Set(0, 0, 0);
+		Ranges.Set(0, 0, 0);
+		if (ComponentMask & 1) Reader << Mins.X << Ranges.X;
+		if (ComponentMask & 2) Reader << Mins.Y << Ranges.Y;
+		if (ComponentMask & 4) Reader << Mins.Z << Ranges.Z;
+	}
+	for (int k = 0; k < NumKeys; k++)
+	{
+		switch (KeyFormat)
+		{
+		case ACF_None:
+		case ACF_Float96NoW:
+			{
+				FVector v;
+				if (ComponentMask & 7)
+				{
+					v.Set(0, 0, 0);
+					if (ComponentMask & 1) Reader << v.X;
+					if (ComponentMask & 2) Reader << v.Y;
+					if (ComponentMask & 4) Reader << v.Z;
+				}
+				else
+				{
+					// ACF_Float96NoW has a special case for ((ComponentMask & 7) == 0)
+					Reader << v;
+				}
+				DstKeys.Add(CVT(v));
+			}
+			break;
+		TPR(ACF_IntervalFixed32NoW, FVectorIntervalFixed32, DstKeys)
+		case ACF_Fixed48NoW:
+			{
+				uint16 X, Y, Z;
+				CVec3 v;
+				v.Set(0, 0, 0);
+				if (ComponentMask & 1)
+				{
+					Reader << X; v[0] = DecodeFixed48_PerTrackComponent<7>(X);
+				}
+				if (ComponentMask & 2)
+				{
+					Reader << Y; v[1] = DecodeFixed48_PerTrackComponent<7>(Y);
+				}
+				if (ComponentMask & 4)
+				{
+					Reader << Z; v[2] = DecodeFixed48_PerTrackComponent<7>(Z);
+				}
+				DstKeys.Add(v);
+			}
+			break;
+		case ACF_Identity:
+			DstKeys.Add(nullVec);
+			break;
+		default:
+			appError("Unknown %s compression method: %d (%s)", TrackKind, KeyFormat, EnumToName(KeyFormat));
+		}
+	}
+	// align to 4 bytes
+	Reader.Seek(Align(Reader.Tell(), 4));
+	if (HasTimeTracks)
+		ReadTimeArray(Reader, NumKeys, DstTimeKeys, NumFrames);
+
+	unguard;
+}
+
+
 static void FixRotationKeys(CAnimSequence* Anim)
 {
 	for (int TrackIndex = 0; TrackIndex < Anim->Tracks.Num(); TrackIndex++)
 	{
 		if (TrackIndex == 0) continue;	// don't fix root track
 		CAnimTrack* Track = Anim->Tracks[TrackIndex];
-		for (int KeyIndex = 0; KeyIndex < Track->KeyQuat.Num(); KeyIndex++)
+		for (CQuat& Key : Track->KeyQuat)
 		{
-			Track->KeyQuat[KeyIndex].Conjugate();
+			Key.Conjugate();
 		}
 	}
 }
 
 // Use skeleton's bone settings to adjust animation sequences
-void AdjustSequenceBySkeleton(USkeleton* Skel, CAnimSequence* Anim)
+static void AdjustSequenceBySkeleton(USkeleton* Skeleton, const TArray<FTransform>& Transforms, CAnimSequence* Anim)
 {
 	guard(AdjustSequenceBySkeleton);
 
-	if (Skel->ReferenceSkeleton.RefBoneInfo.Num() == 0) return;
+	if (Skeleton->ReferenceSkeleton.RefBoneInfo.Num() == 0) return;
+	if (Skeleton->ReferenceSkeleton.RefBoneInfo.Num() != Transforms.Num())
+	{
+		// Bad retarget skeleton, the situation is already signalled in USkeleton::Serialize.
+#if DEBUG_RETARGET
+		appPrintf("Adjust by scale: skip due to bad bone count\n");
+#endif
+		return;
+	}
 
 	for (int TrackIndex = 0; TrackIndex < Anim->Tracks.Num(); TrackIndex++)
 	{
 		CAnimTrack* Track = Anim->Tracks[TrackIndex];
-		CVec3 BoneScale = GetBoneScale(Skel->ReferenceSkeleton, TrackIndex);
-		for (int KeyIndex = 0; KeyIndex < Track->KeyPos.Num(); KeyIndex++)
+		CVec3 BoneScale = GetBoneScale(Skeleton->ReferenceSkeleton, Transforms, TrackIndex);
+		if (BoneScale.x != 1.0f || BoneScale.y != 1.0f || BoneScale.z != 1.0f)
 		{
-			// Scale translation by accumulated bone scale value
-			Track->KeyPos[KeyIndex].Scale(BoneScale);
+#if DEBUG_RETARGET
+			appPrintf("Adjust %d by scale %g %g %g\n", TrackIndex, VECTOR_ARG(BoneScale));
+#endif
+			for (int KeyIndex = 0; KeyIndex < Track->KeyPos.Num(); KeyIndex++)
+			{
+				// Scale translation by accumulated bone scale value
+				Track->KeyPos[KeyIndex].Scale(BoneScale);
+			}
 		}
 	}
 
@@ -428,21 +638,76 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 		ConvertedAnim = AnimSet;
 
 		// Copy bone names
-		AnimSet->TrackBoneNames.Empty(ReferenceSkeleton.RefBoneInfo.Num());
-		for (int i = 0; i < ReferenceSkeleton.RefBoneInfo.Num(); i++)
+		int NumBones = ReferenceSkeleton.RefBoneInfo.Num();
+		assert(BoneTree.Num() == NumBones);
+
+		AnimSet->TrackBoneNames.Empty(NumBones);
+		AnimSet->BonePositions.Empty(NumBones);
+		AnimSet->BoneModes.AddZeroed(NumBones);
+
+#if DEBUG_ANIM
+		char SkelFullName[256];
+		GetFullName(ARRAY_ARG(SkelFullName));
+		appPrintf("------------\nSkeleton: %s\n", SkelFullName);
+#endif
+		for (int i = 0; i < NumBones; i++)
 		{
+			// Store bone name
 			AnimSet->TrackBoneNames.Add(ReferenceSkeleton.RefBoneInfo[i].Name);
+			// Store skeleton's bone transform
+			CSkeletonBonePosition BonePosition;
+			const FTransform& Transform = ReferenceSkeleton.RefBonePose[i];
+			BonePosition.Position = CVT(Transform.Translation);
+			BonePosition.Orientation = CVT(Transform.Rotation);
+#if DEBUG_RETARGET
+			if ((fabs(Transform.Scale3D.X - 1.0f) > 0.001f) ||
+				(fabs(Transform.Scale3D.Y - 1.0f) > 0.001f) ||
+				(fabs(Transform.Scale3D.Z - 1.0f) > 0.001f))
+				appPrintf("RefPose: bone %d (%s) has scale %g %g %g\n", i, *ReferenceSkeleton.RefBoneInfo[i].Name, FVECTOR_ARG(Transform.Scale3D));
+#endif // DEBUG_RETARGET
+			AnimSet->BonePositions.Add(BonePosition);
+			// Process bone retargeting mode
+			EBoneRetargetingMode BoneMode =EBoneRetargetingMode::Animation;
+			switch (BoneTree[i].TranslationRetargetingMode)
+			{
+			case EBoneTranslationRetargetingMode::Skeleton:
+				BoneMode = EBoneRetargetingMode::Mesh;
+				break;
+			case EBoneTranslationRetargetingMode::Animation:
+				BoneMode = EBoneRetargetingMode::Animation;
+				break;
+			case EBoneTranslationRetargetingMode::OrientAndScale:
+				BoneMode = EBoneRetargetingMode::OrientAndScale;
+				break;
+			default:
+				//todo: other modes?
+				BoneMode = EBoneRetargetingMode::OrientAndScale;
+			}
+			AnimSet->BoneModes[i] = BoneMode;
+#if DEBUG_ANIM
+			appPrintf("  %d: %s: (%g %g %g) mode=%d\n", i, *ReferenceSkeleton.RefBoneInfo[i].Name,
+				FVECTOR_ARG(ReferenceSkeleton.RefBonePose[i].Translation), BoneTree[i].TranslationRetargetingMode);
+#endif
 		}
 
-		//TODO: verify if UE4 has AnimRotationOnly stuff
-		AnimSet->AnimRotationOnly = false;
+#if DEBUG_ANIM
+		appPrintf("  .. CAnimSet for %s has been created\n", Name);
+#endif
 	}
 
-	if (!Seq) return; // allow calling ConvertAnims(NULL) to create empty AnimSet
+	// Check for NULL 'Seq' only after CAnimSet is created: we're doing ConvertAnims(NULL) to create an empty AnimSet
+	if (!Seq)
+	{
+		return;
+	}
+#if DEBUG_ANIM
+	appPrintf("Processing Skeleton %s / AnimSequence %s\n", Name, Seq->Name);
+#endif
 
 //	DBG("----------- Skeleton %s: %d seq, %d bones -----------\n", Name, Anims.Num(), ReferenceSkeleton.RefBoneInfo.Num());
 
 	int NumTracks = Seq->GetNumTracks();
+	// Store UAnimSequence in 'OriginalAnims' array, we just need it from time to time
 	OriginalAnims.Add(Seq);
 
 #if DEBUG_DECOMPRESS
@@ -461,14 +726,7 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 		int ScaleKeys = 0, ScaleOffset = 0;
 		if (Seq->CompressedScaleOffsets.IsValid())
 		{
-		#if 0 //?? disabled at 11.04.2017: it takes strip 1 if strip size > 1 - not sure why
-			int ScaleStripSize = Seq->CompressedScaleOffsets.StripSize;
-			ScaleOffset = Seq->CompressedScaleOffsets.OffsetData[localTrackIndex * ScaleStripSize];
-			if (ScaleStripSize > 1)
-				ScaleKeys = Seq->CompressedScaleOffsets.OffsetData[localTrackIndex * ScaleStripSize + 1];
-		#else
 			ScaleOffset = Seq->CompressedScaleOffsets.GetOffsetData(localTrackIndex);
-		#endif
 		}
 		// bone name
 		int BoneTrackIndex = Seq->GetTrackBoneIndex(localTrackIndex);
@@ -498,11 +756,11 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 	}
 #endif // DEBUG_DECOMPRESS
 
-	// some checks
 	int offsetsPerBone = 4;
 	if (Seq->KeyEncodingFormat == AKF_PerTrackCompression)
 		offsetsPerBone = 2;
 
+	// Check for valid data to avoid crash if it's something wrong there
 	if (Seq->CompressedTrackOffsets.Num() != NumTracks * offsetsPerBone && !Seq->RawAnimationData.Num())
 	{
 		appNotify("AnimSequence %s has wrong CompressedTrackOffsets size (has %d, expected %d), removing track",
@@ -510,18 +768,81 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 		return;
 	}
 
-	// create CAnimSequence
-	CAnimSequence *Dst = new CAnimSequence;
+	// Create CAnimSequence
+	CAnimSequence *Dst = new CAnimSequence(Seq);
 	AnimSet->Sequences.Add(Dst);
 	Dst->Name      = Seq->Name;
 	Dst->NumFrames = Seq->NumFrames;
 	Dst->Rate      = Seq->NumFrames / Seq->SequenceLength * Seq->RateScale;
 	Dst->bAdditive = Seq->AdditiveAnimType != AAT_None;
 
+	// Store information for animation retargeting.
+	// Reference: UAnimSequence::GetRetargetTransforms()
+	const TArray<FTransform>* RetargetTransforms = NULL;
+	if (Seq->RetargetSource == "None" && Seq->RetargetSourceAssetReferencePose.Num())
+	{
+		// We'll use RetargetSourceAssetReferencePose as a retarget base
+		RetargetTransforms = &Seq->RetargetSourceAssetReferencePose;
+#if DEBUG_RETARGET
+		appPrintf("  .. %s: Use RetargetSourceAssetReferencePose\n", Seq->Name);
+#endif
+	}
+	else
+	{
+		// Use USkeleton pose for retarget base.
+		// Reference: USkeleton::GetRefLocalPoses()
+#if DEBUG_RETARGET
+		appPrintf("  .. %s: Use RetargetSource '%s'\n", Name, *Seq->RetargetSource);
+#endif
+		if (Seq->RetargetSource != "None")
+		{
+			const FReferencePose* RefPose = AnimRetargetSources.Find(Seq->RetargetSource);
+			// The result might be NULL if there's no RetargetSource for this animation
+			if (RefPose)
+			{
+				RetargetTransforms = &RefPose->ReferencePose;
+#if DEBUG_RETARGET
+				appPrintf("  .. Found RefPose for '%s'\n", *Seq->RetargetSource);
+#endif
+			}
+		}
+		if (!RetargetTransforms)
+		{
+			// Animation will use ReferenceSkeleton for retargeting, we've already copied the
+			// information into CAnimSet::BonePositions array/
+		}
+	}
+
+	if (RetargetTransforms)
+	{
+		//todo: Solve this: RetargetTransforms size may not match ReferenceSkeleton and sequence's track count.
+		//todo: UE4 does some remapping "track to skeleton bone index map". Without assertion things works, seems
+		//todo: because RetargetTransforms array is smaller (or of the same size).
+		//assert(RetargetTransforms->Num() == ReferenceSkeleton.RefBoneInfo.Num());
+		Dst->RetargetBasePose.Empty(RetargetTransforms->Num());
+		for (const FTransform& BoneTransform : *RetargetTransforms)
+		{
+			CSkeletonBonePosition BonePosition;
+			BonePosition.Position = CVT(BoneTransform.Translation);
+			BonePosition.Orientation = CVT(BoneTransform.Rotation);
+			Dst->RetargetBasePose.Add(BonePosition);
+#if DEBUG_RETARGET
+			if (BoneTransform.Scale3D.X != 1.0f || BoneTransform.Scale3D.Y != 1.0f || BoneTransform.Scale3D.Z != 1.0f)
+				appPrintf("Retarget: bone %d (%s) has scale %g %g %g\n", &BoneTransform - RetargetTransforms->GetData(), "?", FVECTOR_ARG(BoneTransform.Scale3D));
+#endif
+		}
+	}
+
 	// bone tracks ...
 	Dst->Tracks.Empty(NumTracks);
 
-	FMemReader Reader(Seq->CompressedByteStream.GetData(), Seq->CompressedByteStream.Num());
+	// There could be an animation consisting of only trans with offsets == -1, what means
+	// use of RefPose. In this case there's no point adding the animation to AnimSet. We'll
+	// create FMemReader even for empty CompressedByteStream, otherwise it would be hard to
+	// create a valid CAnimSequence which won't crash animation export.
+	FMemReader Reader(
+		Seq->CompressedByteStream.Num() ? Seq->CompressedByteStream.GetData() : (const uint8*)"",
+		Seq->CompressedByteStream.Num());
 	Reader.SetupFrom(*Package);
 
 	bool HasTimeTracks = (Seq->KeyEncodingFormat == AKF_VariableKeyLerp);
@@ -535,15 +856,11 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 
 		if (TrackIndex < 0)
 		{
-			// this track has no animation, use static pose from ReferenceSkeleton
-			const FTransform& RefPose = ReferenceSkeleton.RefBonePose[BoneIndex];
-			A->KeyPos.Add(CVT(RefPose.Translation));
-			A->KeyQuat.Add(CVT(RefPose.Rotation));
-			//!! RefPose.Scale3D
+			// This bone is not animated with this UAnimSequence (but it may be animated with other
+			// ones which shares the same USkeleton). Just use an empty track, it should be properly
+			// handled by our animation system.
 			continue;
 		}
-
-		int k;
 
 		if (!Seq->CompressedTrackOffsets.Num())	//?? or if RawAnimData.Num() != 0
 		{
@@ -557,7 +874,6 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 			continue;
 		}
 
-		FVector Mins, Ranges;	// common ...
 		static const CVec3 nullVec  = { 0, 0, 0 };
 		static const CQuat nullQuat = { 0, 0, 0, 1 };
 
@@ -583,17 +899,6 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 			if (ScaleOffset >= 0) { Reader.Seek(ScaleOffset); DUMP_ARC_BYTES(Reader, BytesToDump, "Scale"); }
 #endif
 
-			uint32 PackedInfo;
-			AnimationCompressionFormat KeyFormat;
-			int ComponentMask;
-			int NumKeys;
-
-#define DECODE_PER_TRACK_INFO(info)									\
-			KeyFormat = (AnimationCompressionFormat)(info >> 28);	\
-			ComponentMask = (info >> 24) & 0xF;						\
-			NumKeys       = info & 0xFFFFFF;						\
-			HasTimeTracks = (ComponentMask & 8) != 0;
-
 			guard(TransKeys);
 			// read translation keys
 			if (TransOffset == -1)
@@ -604,76 +909,7 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 			else
 			{
 				Reader.Seek(TransOffset);
-				Reader << PackedInfo;
-				DECODE_PER_TRACK_INFO(PackedInfo);
-				A->KeyPos.Empty(NumKeys);
-				DBG("    [%d] trans: fmt=%d (%s), %d keys, mask %d\n", TrackIndex,
-					KeyFormat, EnumToName(KeyFormat), NumKeys, ComponentMask
-				);
-				if (KeyFormat == ACF_IntervalFixed32NoW)
-				{
-					// read mins/maxs
-					Mins.Set(0, 0, 0);
-					Ranges.Set(0, 0, 0);
-					if (ComponentMask & 1) Reader << Mins.X << Ranges.X;
-					if (ComponentMask & 2) Reader << Mins.Y << Ranges.Y;
-					if (ComponentMask & 4) Reader << Mins.Z << Ranges.Z;
-				}
-				for (k = 0; k < NumKeys; k++)
-				{
-					switch (KeyFormat)
-					{
-					case ACF_None:
-					case ACF_Float96NoW:
-						{
-							FVector v;
-							if (ComponentMask & 7)
-							{
-								v.Set(0, 0, 0);
-								if (ComponentMask & 1) Reader << v.X;
-								if (ComponentMask & 2) Reader << v.Y;
-								if (ComponentMask & 4) Reader << v.Z;
-							}
-							else
-							{
-								// ACF_Float96NoW has a special case for ((ComponentMask & 7) == 0)
-								Reader << v;
-							}
-							A->KeyPos.Add(CVT(v));
-						}
-						break;
-					TPR(ACF_IntervalFixed32NoW, FVectorIntervalFixed32)
-					case ACF_Fixed48NoW:
-						{
-							uint16 X, Y, Z;
-							CVec3 v;
-							v.Set(0, 0, 0);
-							if (ComponentMask & 1)
-							{
-								Reader << X; v[0] = DecodeFixed48_PerTrackComponent<7>(X);
-							}
-							if (ComponentMask & 2)
-							{
-								Reader << Y; v[1] = DecodeFixed48_PerTrackComponent<7>(Y);
-							}
-							if (ComponentMask & 4)
-							{
-								Reader << Z; v[2] = DecodeFixed48_PerTrackComponent<7>(Z);
-							}
-							A->KeyPos.Add(v);
-						}
-						break;
-					case ACF_Identity:
-						A->KeyPos.Add(nullVec);
-						break;
-					default:
-						appError("Unknown translation compression method: %d (%s)", KeyFormat, EnumToName(KeyFormat));
-					}
-				}
-				// align to 4 bytes
-				Reader.Seek(Align(Reader.Tell(), 4));
-				if (HasTimeTracks)
-					ReadTimeArray(Reader, NumKeys, A->KeyPosTime, Seq->NumFrames);
+				ReadPerTrackVectorData(Reader, TrackIndex, "translation", A->KeyPos, A->KeyPosTime, Seq->NumFrames);
 			}
 			unguard;
 
@@ -687,61 +923,24 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 			else
 			{
 				Reader.Seek(RotOffset);
-				Reader << PackedInfo;
-				DECODE_PER_TRACK_INFO(PackedInfo);
-				A->KeyQuat.Empty(NumKeys);
-				DBG("    [%d] rot  : fmt=%d (%s), %d keys, mask %d\n", TrackIndex,
-					KeyFormat, EnumToName(KeyFormat), NumKeys, ComponentMask
-				);
-				if (KeyFormat == ACF_IntervalFixed32NoW)
-				{
-					// read mins/maxs
-					Mins.Set(0, 0, 0);
-					Ranges.Set(0, 0, 0);
-					if (ComponentMask & 1) Reader << Mins.X << Ranges.X;
-					if (ComponentMask & 2) Reader << Mins.Y << Ranges.Y;
-					if (ComponentMask & 4) Reader << Mins.Z << Ranges.Z;
-				}
-				for (k = 0; k < NumKeys; k++)
-				{
-					switch (KeyFormat)
-					{
-					case ACF_None:
-					case ACF_Float96NoW:
-						{
-							FQuatFloat96NoW q;
-							Reader << q;
-							FQuat q2 = q;				// convert
-							A->KeyQuat.Add(CVT(q2));
-						}
-						break;
-					case ACF_Fixed48NoW:
-						{
-							FQuatFixed48NoW q;
-							q.X = q.Y = q.Z = 32767;	// corresponds to 0
-							if (ComponentMask & 1) Reader << q.X;
-							if (ComponentMask & 2) Reader << q.Y;
-							if (ComponentMask & 4) Reader << q.Z;
-							FQuat q2 = q;				// convert
-							A->KeyQuat.Add(CVT(q2));
-						}
-						break;
-					TR (ACF_Fixed32NoW, FQuatFixed32NoW)
-					TRR(ACF_IntervalFixed32NoW, FQuatIntervalFixed32NoW)
-					TR (ACF_Float32NoW, FQuatFloat32NoW)
-					case ACF_Identity:
-						A->KeyQuat.Add(nullQuat);
-						break;
-					default:
-						appError("Unknown rotation compression method: %d (%s)", KeyFormat, EnumToName(KeyFormat));
-					}
-				}
-				// align to 4 bytes
-				Reader.Seek(Align(Reader.Tell(), 4));
-				if (HasTimeTracks)
-					ReadTimeArray(Reader, NumKeys, A->KeyQuatTime, Seq->NumFrames);
+				ReadPerTrackQuatData(Reader, TrackIndex, "rotation", A->KeyQuat, A->KeyQuatTime, Seq->NumFrames);
 			}
 			unguard;
+
+#if SUPPORT_SCALE_KEYS
+			guard(ScaleKeys);
+			// read scale keys
+			if (ScaleOffset == -1)
+			{
+				DBG("    [%d] no scale data\n", TrackIndex);
+			}
+			else
+			{
+				Reader.Seek(ScaleOffset);
+				ReadPerTrackVectorData(Reader, TrackIndex, "scale", A->KeyScale, A->KeyScaleTime, Seq->NumFrames);
+			}
+			unguard;
+#endif // SUPPORT_SCALE_KEYS
 
 			unguard;
 
@@ -763,6 +962,8 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 		A->KeyPos.Empty(TransKeys);
 		A->KeyQuat.Empty(RotKeys);
 
+		FVector Mins, Ranges;
+
 		// read translation keys
 		if (TransKeys)
 		{
@@ -776,13 +977,13 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 				Reader << Mins << Ranges;
 			}
 
-			for (k = 0; k < TransKeys; k++)
+			for (int k = 0; k < TransKeys; k++)
 			{
 				switch (TranslationCompressionFormat)
 				{
 				TP (ACF_None,               FVector)
 				TP (ACF_Float96NoW,         FVector)
-				TPR(ACF_IntervalFixed32NoW, FVectorIntervalFixed32)
+				TPR(ACF_IntervalFixed32NoW, FVectorIntervalFixed32, A->KeyPos)
 				TP (ACF_Fixed48NoW,         FVectorFixed48)
 				case ACF_Identity:
 					A->KeyPos.Add(nullVec);
@@ -820,16 +1021,16 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 			Reader << Mins << Ranges;
 		}
 
-		for (k = 0; k < RotKeys; k++)
+		for (int k = 0; k < RotKeys; k++)
 		{
 			switch (RotationCompressionFormat)
 			{
-			TR (ACF_None, FQuat)
-			TR (ACF_Float96NoW, FQuatFloat96NoW)
-			TR (ACF_Fixed48NoW, FQuatFixed48NoW)
-			TR (ACF_Fixed32NoW, FQuatFixed32NoW)
-			TRR(ACF_IntervalFixed32NoW, FQuatIntervalFixed32NoW)
-			TR (ACF_Float32NoW, FQuatFloat32NoW)
+			TR (ACF_None, FQuat, A->KeyQuat)
+			TR (ACF_Float96NoW, FQuatFloat96NoW, A->KeyQuat)
+			TR (ACF_Fixed48NoW, FQuatFixed48NoW, A->KeyQuat)
+			TR (ACF_Fixed32NoW, FQuatFixed32NoW, A->KeyQuat)
+			TRR(ACF_IntervalFixed32NoW, FQuatIntervalFixed32NoW, A->KeyQuat)
+			TR (ACF_Float32NoW, FQuatFloat32NoW, A->KeyQuat)
 			case ACF_Identity:
 				A->KeyQuat.Add(nullQuat);
 				break;
@@ -855,7 +1056,8 @@ void USkeleton::ConvertAnims(UAnimSequence4* Seq)
 
 	// Now should invert all imported rotations
 	FixRotationKeys(Dst);
-	AdjustSequenceBySkeleton(this, Dst);
+	// And apply scales to positions, when skeleton has any
+	AdjustSequenceBySkeleton(this, RetargetTransforms ? *RetargetTransforms : ReferenceSkeleton.RefBonePose, Dst);
 
 	unguardf("Skel=%s Anim=%s", Name, Seq->Name);
 }
@@ -1387,7 +1589,19 @@ void UAnimSequence4::TransferPerTrackData(TArray<uint8>& Dst, const TArray<uint8
 void UAnimSequence4::PostLoad()
 {
 	guard(UAnimSequence4::PostLoad);
-	if (!Skeleton) return;		// missing package etc
+	if (!Skeleton)
+	{
+		// missing package etc
+		appPrintf("WARNING: unable to load animation %s, missing Skeleton\n", Name);
+		return;
+	}
+
+	// Scale RetargetSourceAssetReferencePose
+	if (RetargetSourceAssetReferencePose.Num())
+	{
+		AdjustBoneScales(Skeleton->ReferenceSkeleton, RetargetSourceAssetReferencePose);
+	}
+
 	Skeleton->ConvertAnims(this);
 
 	// Release original animation data to save memory
@@ -1407,7 +1621,6 @@ int UAnimSequence4::GetNumTracks() const
 	return CompressedTrackToSkeletonMapTable.Num() ? CompressedTrackToSkeletonMapTable.Num() : TrackToSkeletonMapTable.Num();
 }
 
-
 int UAnimSequence4::GetTrackBoneIndex(int TrackIndex) const
 {
 	if (CompressedTrackToSkeletonMapTable.Num())
@@ -1415,7 +1628,6 @@ int UAnimSequence4::GetTrackBoneIndex(int TrackIndex) const
 	else
 		return TrackToSkeletonMapTable[TrackIndex].BoneTreeIndex;
 }
-
 
 int UAnimSequence4::FindTrackForBoneIndex(int BoneIndex) const
 {

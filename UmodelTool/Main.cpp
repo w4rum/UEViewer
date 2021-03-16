@@ -154,6 +154,7 @@ END_CLASS_TABLE
 	SuppressUnknownClass("UPhysicalMaterial");
 	SuppressUnknownClass("UBodySetup");
 	SuppressUnknownClass("UNavCollision");
+	SuppressUnknownClass("USkeletalMeshSocket");
 }
 
 
@@ -221,10 +222,12 @@ static void RegisterClasses(int game)
 			UnregisterClass("Skeleton", false);
 	}
 	if (!GSettings.Startup.UseStaticMesh) UnregisterClass("StaticMesh", true);
+	if (!GSettings.Startup.UseVertMesh) UnregisterClass("VertMesh", true);
 	if (!GSettings.Startup.UseTexture)
 	{
 		UnregisterClass("UnrealMaterial", true);
 		UnregisterClass("MaterialExpression", true);
+		SuppressUnknownClass("UMaterial*");
 	}
 	if (!GSettings.Startup.UseMorphTarget) UnregisterClass("MorphTarget", false);
 	if (!GSettings.Startup.UseLightmapTexture) UnregisterClass("LightMapTexture2D", true);
@@ -402,13 +405,16 @@ static void PrintUsage()
 			"    -gui            force startup UI to appear\n" //?? debug-only option?
 #endif
 			"    -aes=key        provide AES decryption key for encrypted pak files,\n"
-			"                    key is ASCII or hex string (hex format is 0xAABBCCDD)\n"
+			"                    key is ASCII or hex string (hex format is 0xAABBCCDD),\n"
+			"                    multiple options could be provided for multi-key games\n"
+			"    -aes=@file.txt  read AES decryption key(s) from a text file\n"
 			"\n"
 			"Compatibility options:\n"
 			"    -nomesh         disable loading of SkeletalMesh classes in a case of\n"
 			"                    unsupported data format\n"
 			"    -noanim         disable loading of MeshAnimation classes\n"
 			"    -nostat         disable loading of StaticMesh class\n"
+			"    -novert         disable loading of VertMesh class\n"
 			"    -notex          disable loading of Material classes\n"
 			"    -nomorph        disable loading of MorphTarget class\n"
 			"    -nolightmap     disable loading of Lightmap textures\n"
@@ -554,22 +560,23 @@ int UE4UnversionedPackage(int verMin, int verMax)
 	return -1;
 }
 
-static void CheckHexAesKey()
+// Attempts to evaluate the provided Key as hex string, does inplace replacement
+static void CheckHexAesKey(FString& Key)
 {
 #define ishex(c)		( (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') )
 #define hextodigit(c)	( (c >= 'a') ? c - 'a' + 10 : c - '0' )
 
-	if (GAesKey.Len() < 3) return;
-	const char* s = *GAesKey;
+	if (Key.Len() < 3) return;
+	const char* s = *Key;
 
 	// Hex key starts with "0x"
 	if (*s++ != '0') return;
 	if (tolower(*s++) != 'x') return;
 
-	FString NewKey;
-	NewKey.Empty(GAesKey.Len() / 2 + 1);
+	FStaticString<256> NewKey;
+	NewKey.Empty(Key.Len() / 2 + 1);
 
-	int remains = GAesKey.Len() - 2;
+	int remains = Key.Len() - 2;
 	if (remains & 1)
 	{
 		appErrorNoLog("Hexadecimal AES key contains odd number of characters");
@@ -599,7 +606,49 @@ static void CheckHexAesKey()
 		NewKey.AppendChar((char)b);
 	}
 
-	GAesKey = NewKey;
+	Key = NewKey;
+}
+
+static void HandleAesKeyOption(const char* value)
+{
+	FStaticString<256> Key = value;
+	if (Key.Len())
+	{
+		if (Key[0] == '@')
+		{
+			// Load a file with keys
+			const char* KeyFile = *Key + 1;
+			FILE* f = fopen(KeyFile, "r");
+			if (f)
+			{
+				char buffer[1024];
+				while (!feof(f))
+				{
+					if (fgets(buffer, ARRAY_COUNT(buffer), f))
+					{
+						FStaticString<256> Key = buffer;
+						Key.TrimStartAndEndInline();
+						if (!Key.IsEmpty())
+						{
+							CheckHexAesKey(Key);
+							GAesKeys.Add(Key);
+						}
+					}
+				}
+				fclose(f);
+			}
+			else
+			{
+				appPrintf("Warning: -aes option refers missing file %s\n", KeyFile);
+			}
+		}
+		else
+		{
+			Key.TrimStartAndEndInline();
+			CheckHexAesKey(Key);
+			GAesKeys.Add(Key);
+		}
+	}
 }
 
 bool UE4EncryptedPak()
@@ -610,10 +659,18 @@ bool UE4EncryptedPak()
 	if (lock) return false;
 	lock = true;
 
-	GAesKey = GApplication.ShowUE4AesKeyDialog();
-	GAesKey.TrimStartAndEndInline();
-	CheckHexAesKey();
-	return GAesKey.Len() > 0;
+	TArray<FString> Keys;
+	if (!GApplication.ShowUE4AesKeyDialog(Keys))
+	{
+		// No key(s) has been provided
+		return false;
+	}
+	for (FString& Key : Keys)
+	{
+		CheckHexAesKey(Key);
+		GAesKeys.Add(Key);
+	}
+	return true;
 #else
 	return false;
 #endif
@@ -780,6 +837,7 @@ int main(int argc, const char **argv)
 			// disable classes
 			OPT_NBOOL("nomesh",  GSettings.Startup.UseSkeletalMesh)
 			OPT_NBOOL("nostat",  GSettings.Startup.UseStaticMesh)
+			OPT_NBOOL("novert",  GSettings.Startup.UseVertMesh)
 			OPT_NBOOL("noanim",  GSettings.Startup.UseAnimation)
 			OPT_NBOOL("notex",   GSettings.Startup.UseTexture)
 			OPT_NBOOL("nomorph", GSettings.Startup.UseMorphTarget)
@@ -882,9 +940,7 @@ int main(int argc, const char **argv)
 		}
 		else if (!strnicmp(opt, "aes=", 4))
 		{
-			GAesKey = opt+4;
-			GAesKey.TrimStartAndEndInline();
-			CheckHexAesKey();
+			HandleAesKeyOption(opt+4);
 		}
 		// information commands
 		else if (!stricmp(opt, "taglist"))
@@ -1028,7 +1084,19 @@ int main(int argc, const char **argv)
 
 		if (!Files.Num())
 		{
-			appPrintf("WARNING: unable to find package %s\n", packagesToLoad[i]);
+			// Handling case when only full package name has been passes: appFindGameFiles
+			// won't handle this, but UnPackage::LoadPackage() has a possibility to find a
+			// package with a full file name.
+			UnPackage* Package = UnPackage::LoadPackage(packagesToLoad[i]);
+			if (!Package)
+			{
+				appPrintf("WARNING: unable to find package %s\n", packagesToLoad[i]);
+			}
+			else
+			{
+				Packages.Add(Package);
+				GameFiles.Add(Package->FileInfo);
+			}
 		}
 		else
 		{
@@ -1101,7 +1169,7 @@ int main(int argc, const char **argv)
 			for (int i = 0; i < Package->Summary.ExportCount; i++)
 			{
 				const FObjectExport &Exp = Package->ExportTable[i];
-				appPrintf("%4d %8X %8X %s %s\n", i, Exp.SerialOffset, Exp.SerialSize, Package->GetObjectName(Exp.ClassIndex), *Exp.ObjectName);
+				appPrintf("%4d %8X %8X %s %s\n", i, Exp.SerialOffset, Exp.SerialSize, Package->GetClassNameFor(Exp), *Exp.ObjectName);
 			}
 		}
 		unguard;
@@ -1252,11 +1320,12 @@ int main(int argc, const char **argv)
 		appPrintf("\nThe specified package(s) has no objects to display.\n\n");
 		goto no_objects;
 	}
+	assert(GApplication.Viewer != NULL);
 
+#if TEST_FILES
 	// print mesh info
-#	if TEST_FILES
 	GApplication.Viewer->Test();
-#	endif
+#endif
 
 	if (mainCmd == CMD_View)
 	{

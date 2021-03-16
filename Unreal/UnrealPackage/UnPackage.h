@@ -199,6 +199,16 @@ struct FObjectExport
 	#endif // USE_COMPACT_PACKAGE_STRUCTS
 #endif // UNREAL3
 
+#if UNREAL4
+	// In UE4.26 IoStore package structure is different, 'ClassIndex' is replaced with global
+	// script object index.
+	const char* ClassName_IO;
+	// IoStore has reordered objects, but preserves "CookedSerialOffset" in export table.
+	// We need to serialize data from the "read" offset, but set up the loader so it will
+	// think that offset is like in original package.
+	uint32		RealSerialOffset;
+#endif
+
 	friend FArchive& operator<<(FArchive &Ar, FObjectExport &E);
 
 private:
@@ -240,6 +250,9 @@ public:
 	const char**			NameTable;
 	FObjectImport*			ImportTable;
 	FObjectExport*			ExportTable;
+#if UNREAL4
+	struct FPackageObjectIndex* ExportIndices_IOS;
+#endif
 
 protected:
 	UnPackage(const char *filename, const CGameFileInfo* fileInfo = NULL, bool silent = false);
@@ -273,6 +286,11 @@ public:
 	{
 		return PackageMap;
 	}
+
+#if UNREAL4
+	// Loaded for global IO Store container data
+	static void LoadGlobalData4(FArchive* NameAr, FArchive* MetaAr, int NameCount);
+#endif
 
 protected:
 	// Create loader FArchive for package
@@ -345,6 +363,15 @@ public:
 		unguardf("Index=%d", PackageIndex);
 	}
 
+	const char* GetClassNameFor(const FObjectExport& Exp) const
+	{
+#if UNREAL4
+		// Allow to explicitly provide the class name
+		if (Exp.ClassName_IO) return Exp.ClassName_IO;
+#endif
+		return GetObjectName(Exp.ClassIndex);
+	}
+
 	int FindExport(const char *name, const char *className = NULL, int firstIndex = 0) const;
 	int FindExportForImport(const char *ObjectName, const char *ClassName, UnPackage *ImporterPackage, int ImporterIndex);
 	bool CompareObjectPaths(int PackageIndex, UnPackage *RefPackage, int RefPackageIndex) const;
@@ -412,6 +439,9 @@ public:
 	}
 
 private:
+	void RegisterPackage(const char* filename);
+	void UnregisterPackage();
+
 	void LoadNameTable();
 	void LoadNameTable2();
 	void LoadNameTable3();
@@ -420,6 +450,16 @@ private:
 
 	void LoadImportTable();
 	void LoadExportTable();
+
+#if UNREAL4
+	// IsStore AsyncPackage support
+	void LoadPackageIoStore();
+	void LoadNameTableIoStore(const byte* Data, int NameCount, int TableSize);
+	void LoadExportTableIoStore(
+		const byte* Data, int ExportCount, int TableSize, int PackageHeaderSize,
+		const TArray<struct FExportBundleHeader>& BundleHeaders, const TArray<struct FExportBundleEntry>& BundleEntries);
+	void LoadImportTableIoStore(const byte* Data, int ImportCount, const TArray<const CGameFileInfo*>& ImportPackages, struct CImportTableErrorStats& ErrorStats);
+#endif // UNREAL4
 
 	static TArray<UnPackage*> PackageMap;
 };

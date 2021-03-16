@@ -1,12 +1,18 @@
 #include "Core.h"
 #include "UnCore.h"
 #include "GameFileSystem.h"
+#include "FileSystemUtils.h"
 
 #include "UnArchivePak.h"
 
 #if UNREAL4
 
 #define PAK_FILE_MAGIC		0x5A6F12E1
+
+// Number of pak file handles kept open when files no longer used (cache of open pak file handles).
+// We're limiting number of simultaneously open pak files to this value in a case game has number
+// of pak files exceeding C library limitations (2048 files in msvcrt.dll).
+#define MAX_OPEN_PAKS		32
 
 FArchive& operator<<(FArchive& Ar, FPakInfo& P)
 {
@@ -44,24 +50,7 @@ FArchive& operator<<(FArchive& Ar, FPakInfo& P)
 			char name[32+1];
 			Ar.Serialize(name, 32);
 			name[32] = 0;
-			int32 CompressionMethod = 0;
-			if (!stricmp(name, "zlib"))
-			{
-				CompressionMethod = COMPRESS_ZLIB;
-			}
-			else if (!stricmp(name, "oodle"))
-			{
-				CompressionMethod = COMPRESS_OODLE;
-			}
-			else if (!stricmp(name, "lz4"))
-			{
-				CompressionMethod = COMPRESS_LZ4;
-			}
-			else if (name[0])
-			{
-				appPrintf("Warning: unknown compression method for pak: %s\n", name);
-			}
-			P.CompressionMethods[i] = CompressionMethod;
+			P.CompressionMethods[i] = StringToCompressionMethod(name);
 		}
 	}
 
@@ -264,8 +253,8 @@ void FPakEntry::DecodeFrom(const uint8* Data)
 			int64 Alignment = bEncrypted ? FPakFile::EncryptionAlign : 1;
 			for (int BlockIndex = 0; BlockIndex < BlockCount; BlockIndex++)
 			{
-				int64 CurrentBlockSize = *(int64*)Data;
-				Data += sizeof(int64);
+				uint32 CurrentBlockSize = *(uint32*)Data;
+				Data += sizeof(uint32);
 
 				FPakCompressedBlock& Block = CompressionBlocks[BlockIndex];
 				Block.CompressedStart = CurrentOffset;
@@ -278,12 +267,41 @@ void FPakEntry::DecodeFrom(const uint8* Data)
 	unguard;
 }
 
+FPakFile::~FPakFile()
+{
+	// Can't call virtual 'Close' from destructor, so use fully qualified name
+	FPakFile::Close();
+}
+
+void FPakFile::Close()
+{
+	if (UncompressedBuffer)
+	{
+		appFree(UncompressedBuffer);
+		UncompressedBuffer = NULL;
+	}
+	if (IsFileOpen)
+	{
+		Parent->FileClosed();
+		IsFileOpen = false;
+	}
+}
+
 void FPakFile::Serialize(void *data, int size)
 {
 	PROFILE_IF(size >= 1024);
 	guard(FPakFile::Serialize);
 	if (ArStopper > 0 && ArPos + size > ArStopper)
 		appError("Serializing behind stopper (%X+%X > %X)", ArPos, size, ArStopper);
+
+	// (Re-)open pak file if needed
+	if (!IsFileOpen)
+	{
+		Parent->FileOpened();
+		IsFileOpen = true;
+	}
+
+	FArchive* Reader = Parent->Reader;
 
 	if (Info->CompressionMethod)
 	{
@@ -318,8 +336,8 @@ void FPakFile::Serialize(void *data, int size)
 					CompressedData = (byte*)appMallocNoInit(EncryptedSize);
 					Reader->Seek64(Block.CompressedStart);
 					Reader->Serialize(CompressedData, EncryptedSize);
-					PakRequireAesKey();
-					appDecryptAES(CompressedData, EncryptedSize);
+					FileRequiresAesKey();
+					Parent->DecryptDataBlock(CompressedData, EncryptedSize);
 				}
 				appDecompress(CompressedData, CompressedBlockSize, UncompressedBuffer, UncompressedBlockSize, Info->CompressionMethod);
 				appFree(CompressedData);
@@ -365,8 +383,8 @@ void FPakFile::Serialize(void *data, int size)
 					RemainingSize = EncryptedBufferSize;
 				RemainingSize = Align(RemainingSize, EncryptionAlign); // align for AES, pak contains aligned data
 				Reader->Serialize(UncompressedBuffer, RemainingSize);
-				PakRequireAesKey();
-				appDecryptAES(UncompressedBuffer, RemainingSize);
+				FileRequiresAesKey();
+				Parent->DecryptDataBlock(UncompressedBuffer, RemainingSize);
 			}
 
 			// Now copy decrypted data from UncompressedBuffer (code is very similar to those used in decompression above)
@@ -400,42 +418,6 @@ void FPakFile::Serialize(void *data, int size)
 		unguard;
 	}
 	unguardf("file=%s", *Info->FileInfo->GetRelativeName());
-}
-
-void FPakVFS::CompactFilePath(FString& Path)
-{
-	guard(FPakVFS::CompactFilePath);
-
-	if (Path.StartsWith("/Engine/Content"))	// -> /Engine
-	{
-		Path.RemoveAt(7, 8);
-		return;
-	}
-	if (Path.StartsWith("/Engine/Plugins")) // -> /Plugins
-	{
-		Path.RemoveAt(0, 7);
-		return;
-	}
-
-	if (Path[0] != '/')
-		return;
-
-	char* delim = strchr(&Path[1], '/');
-	if (!delim)
-		return;
-	if (strncmp(delim, "/Content/", 9) != 0)
-		return;
-
-	int pos = delim - &Path[0];
-	if (pos > 4)
-	{
-		// /GameName/Content -> /Game
-		int toRemove = pos + 8 - 5;
-		Path.RemoveAt(5, toRemove);
-		memcpy(&Path[1], "Game", 4);
-	}
-
-	unguard;
 }
 
 bool FPakVFS::AttachReader(FArchive* reader, FString& error)
@@ -486,7 +468,7 @@ bool FPakVFS::AttachReader(FArchive* reader, FString& error)
 
 	if (info.bEncryptedIndex)
 	{
-		if (!PakRequireAesKey(false))
+		if (!FileRequiresAesKey(false))
 		{
 			char buf[1024];
 			appSprintf(ARRAY_ARG(buf), "WARNING: Pak \"%s\" has encrypted index. Skipping.", *Filename);
@@ -523,9 +505,74 @@ bool FPakVFS::AttachReader(FArchive* reader, FString& error)
 		appPrintf(", version %d\n", info.Version);
 	}
 
+	// Close the file handle
+	if (Reader)
+	{
+		Reader->Close();
+	}
+
 	return result;
 
 	unguardf("PakVer=%d.%d", mainVer, subVer);
+}
+
+// FPakVFS objects which has Reader open, but no active files (MRU)
+static TStaticArray<FPakVFS*, MAX_OPEN_PAKS>  VFSWithOpenReaders;
+
+FArchive* FPakVFS::CreateReader(int index)
+{
+	guard(FPakVFS::CreateReader);
+
+	const FPakEntry& info = FileInfos[index];
+	FileOpened();
+	return new FPakFile(&info, this);
+
+	unguard;
+}
+
+void FPakVFS::FileOpened()
+{
+	guard(FPakVFS::FileOpened);
+
+	if (NumOpenFiles++ == 0)
+	{
+		// This is the very first open handle in pak.
+		// This pak could be in VFSWithOpenReaders list, in this case just reuse it without opening.
+		int FoundIndex = VFSWithOpenReaders.FindItem(this);
+		if (FoundIndex >= 0)
+		{
+			// This pak should be already opened
+			assert(VFSWithOpenReaders[FoundIndex]->Reader->IsOpen());
+			VFSWithOpenReaders.RemoveAt(FoundIndex);
+		}
+		else
+		{
+			if (!Reader->IsOpen())
+				Reader->Open();
+		}
+	}
+
+	unguard;
+}
+
+void FPakVFS::FileClosed()
+{
+	guard(FPakVFS::FileClosed);
+
+	assert(NumOpenFiles > 0);
+	if (--NumOpenFiles == 0)
+	{
+		// Put this pak file into VFSWithOpenReaders.
+		// Check for MRU list overflow, drop the olders pak file.
+		if (VFSWithOpenReaders.Num() == MAX_OPEN_PAKS)
+		{
+			VFSWithOpenReaders[MAX_OPEN_PAKS-1]->Reader->Close();
+			VFSWithOpenReaders.RemoveAt(MAX_OPEN_PAKS-1);
+		}
+		VFSWithOpenReaders.Insert(this, 0);
+	}
+
+	unguard;
 }
 
 static bool ValidateString(FArchive& Ar)
@@ -565,19 +612,62 @@ static bool ValidateString(FArchive& Ar)
 	return !bFail;
 }
 
-void FPakVFS::ValidateMountPoint(FString& MountPoint)
+bool FPakVFS::DecryptPakIndex(TArray<byte>& IndexData, FString& ErrorString)
 {
-	bool badMountPoint = false;
-	if (!MountPoint.RemoveFromStart("../../.."))
-		badMountPoint = true;
-	if (MountPoint[0] != '/' || ( (MountPoint.Len() > 1) && (MountPoint[1] == '.') ))
-		badMountPoint = true;
+	guard(FPakVFS::DecryptPakIndex);
 
-	if (badMountPoint)
+	// Find an encryption key which will match this pak file
+	for (const FString& Key : GAesKeys)
 	{
-		appPrintf("WARNING: Pak \"%s\" has strange mount point \"%s\", mounting to root\n", *Filename, *MountPoint);
-		MountPoint = "/";
+		// Try decrypting a small amount of data with a current key
+		byte TestBuffer[256];
+		int TestLen = min(IndexData.Num(), ARRAY_COUNT(TestBuffer));
+		memcpy(TestBuffer, IndexData.GetData(), TestLen);
+		appDecryptAES(TestBuffer, TestLen, &Key[0], Key.Len());
+		FMemReader ValidatorReader(TestBuffer, TestLen);
+		if (ValidateString(ValidatorReader))
+		{
+			// Matching key
+			PakEncryptionKey = Key;
+			break;
+		}
 	}
+	if (PakEncryptionKey.IsEmpty())
+	{
+		char buf[1024];
+		appSprintf(ARRAY_ARG(buf), "WARNING: The provided encryption key doesn't work with \"%s\". Skipping.", *Filename);
+		ErrorString = buf;
+		return false;
+	}
+
+	// Decrypt the index
+	appDecryptAES(IndexData.GetData(), IndexData.Num(), &PakEncryptionKey[0], PakEncryptionKey.Len());
+	return true;
+
+	unguard;
+}
+
+const FString& FPakVFS::GetPakEncryptionKey() const
+{
+	if (!PakEncryptionKey.IsEmpty())
+		return PakEncryptionKey;
+
+	// No encrypted index, so pick the first available key
+	if (GAesKeys.Num())
+		return GAesKeys[0];
+
+	static FString EmptyString;
+	return EmptyString;
+}
+
+void FPakVFS::DecryptDataBlock(byte* Data, int DataSize)
+{
+	guard(FPakVFS::DecryptDataBlock);
+
+	const FString& Key = GetPakEncryptionKey();
+	appDecryptAES(Data, DataSize, &Key[0], Key.Len());
+
+	unguard;
 }
 
 bool FPakVFS::LoadPakIndexLegacy(FArchive* reader, const FPakInfo& info, FString& error)
@@ -588,35 +678,20 @@ bool FPakVFS::LoadPakIndexLegacy(FArchive* reader, const FPakInfo& info, FString
 	TArray<byte> InfoBlock;
 	InfoBlock.SetNumUninitialized(info.IndexSize);
 	reader->Serialize(InfoBlock.GetData(), info.IndexSize);
-	FMemReader InfoReader(InfoBlock.GetData(), info.IndexSize);
-	InfoReader.SetupFrom(*reader);
 
 	// Manage pak files with encrypted index
 	if (info.bEncryptedIndex)
 	{
-		guard(CheckEncryptedIndex);
-
-		appDecryptAES(InfoBlock.GetData(), InfoBlock.Num());
-
-		// Try to validate the decrypted data. The first thing going here is MountPoint which is FString.
-		if (!ValidateString(InfoReader))
-		{
-			char buf[1024];
-			appSprintf(ARRAY_ARG(buf), "WARNING: The provided encryption key doesn't work with \"%s\". Skipping.", *Filename);
-			error = buf;
+		if (!DecryptPakIndex(InfoBlock, error))
 			return false;
-		}
-
-		// Data is ok, seek to data start.
-		InfoReader.Seek(0);
-
-		unguard;
 	}
 
 	// this file looks correct, store 'reader'
 	Reader = reader;
 
 	// Read pak index
+	FMemReader InfoReader(InfoBlock.GetData(), info.IndexSize);
+	InfoReader.SetupFrom(*reader);
 
 	TRY {
 		// Read MountPoint with catching error, to override error message.
@@ -638,12 +713,12 @@ bool FPakVFS::LoadPakIndexLegacy(FArchive* reader, const FPakInfo& info, FString
 	InfoReader << count;
 	if (!count)
 	{
-		appPrintf("Empty pak file \"%s\"\n", *Filename);
+//		appPrintf("Empty pak file \"%s\"\n", *Filename);
 		return true;
 	}
 
 	// Process MountPoint
-	ValidateMountPoint(MountPoint);
+	ValidateMountPoint(MountPoint, Filename);
 
 	// Read file information
 	FileInfos.AddZeroed(count);
@@ -715,35 +790,20 @@ bool FPakVFS::LoadPakIndex(FArchive* reader, const FPakInfo& info, FString& erro
 	TArray<byte> InfoBlock;
 	InfoBlock.SetNumUninitialized(info.IndexSize);
 	reader->Serialize(InfoBlock.GetData(), info.IndexSize);
-	FMemReader InfoReader(InfoBlock.GetData(), info.IndexSize);
-	InfoReader.SetupFrom(*reader);
 
 	// Manage pak files with encrypted index
 	if (info.bEncryptedIndex)
 	{
-		guard(CheckEncryptedIndex);
-
-		appDecryptAES(InfoBlock.GetData(), InfoBlock.Num());
-
-		// Try to validate the decrypted data. The first thing going here is MountPoint which is FString.
-		if (!ValidateString(InfoReader))
-		{
-			char buf[1024];
-			appSprintf(ARRAY_ARG(buf), "WARNING: The provided encryption key doesn't work with \"%s\". Skipping.", *Filename);
-			error = buf;
+		if (!DecryptPakIndex(InfoBlock, error))
 			return false;
-		}
-
-		// Data is ok, seek to data start.
-		InfoReader.Seek(0);
-
-		unguard;
 	}
 
 	// this file looks correct, store 'reader'
 	Reader = reader;
 
 	// Read pak index
+	FMemReader InfoReader(InfoBlock.GetData(), info.IndexSize);
+	InfoReader.SetupFrom(*reader);
 
 	TRY {
 		// Read MountPoint with catching error, to override error message.
@@ -765,13 +825,13 @@ bool FPakVFS::LoadPakIndex(FArchive* reader, const FPakInfo& info, FString& erro
 	InfoReader << count;
 	if (!count)
 	{
-		appPrintf("Empty pak file \"%s\"\n", *Filename);
+//		appPrintf("Empty pak file \"%s\"\n", *Filename);
 		return true;
 	}
 	Reserve(count);
 
 	// Process MountPoint
-	ValidateMountPoint(MountPoint);
+	ValidateMountPoint(MountPoint, Filename);
 
 	uint64 PathHashSeed;
 	InfoReader << PathHashSeed;
@@ -832,7 +892,7 @@ bool FPakVFS::LoadPakIndex(FArchive* reader, const FPakInfo& info, FString& erro
 	if (info.bEncryptedIndex)
 	{
 		// Read encrypted data and decrypt
-		appDecryptAES(InfoBlock.GetData(), InfoBlock.Num());
+		DecryptDataBlock(InfoBlock.GetData(), InfoBlock.Num());
 	}
 	unguard;
 
@@ -870,11 +930,15 @@ bool FPakVFS::LoadPakIndex(FArchive* reader, const FPakInfo& info, FString& erro
 		if (DirectoryPath[DirectoryPath.Len()-1] == '/')
 			DirectoryPath.RemoveAt(DirectoryPath.Len()-1, 1);
 
-		int FolderIndex = RegisterGameFolder(*DirectoryPath);
-
 		// Read size of FPakDirectory (DirectoryIndex::Value)
 		int32 NumFilesInDirectory;
 		InfoReader << NumFilesInDirectory;
+
+		int FolderIndex = -1;
+		if (NumFilesInDirectory)
+		{
+			FolderIndex = RegisterGameFolder(*DirectoryPath);
+		}
 
 		for (int DirectoryFileIndex = 0; DirectoryFileIndex < NumFilesInDirectory; DirectoryFileIndex++)
 		{

@@ -63,8 +63,8 @@ class UnPackage;
 #define PACKAGE_FILE_TAG_REV	0xC1832A9E
 
 #if PROFILE
-extern int GNumSerialize;
-extern int GSerializeBytes;
+extern uint32 GNumSerialize;
+extern uint32 GSerializeBytes;
 
 void appResetProfiler();
 void appPrintProfiler(const char* label = NULL);
@@ -93,11 +93,18 @@ class FVirtualFileSystem;
 struct CGameFileInfo
 {
 public:
+	enum
+	{
+		GFI_None = 0,
+		GFI_Package = 1,							// This is a package
+		GFI_IOStoreFile = 2,						// This file is located in UE4 IOStore
+	};
+
 	// Placed here for better cache locality
 	uint16		FolderIndex;						// index of folder containing the file (folder is relative to game directory)
-	bool		IsPackage;
 
 protected:
+	uint32		Flags;								// set of GFI_... flags
 	uint8		ExtensionOffset;					// Extension = ShortName+ExtensionOffset, points after '.'
 	CGameFileInfo* HashNext;						// used for fast search; computed from ShortFilename excluding extension
 
@@ -167,6 +174,16 @@ public:
 		CGameFileInfo* saveHash = HashNext;
 		memcpy(this, other, sizeof(CGameFileInfo));
 		HashNext = saveHash;
+	}
+
+	FORCEINLINE bool IsPackage() const
+	{
+		return (Flags & GFI_Package) != 0;
+	}
+
+	FORCEINLINE bool IsIOStoreFile() const
+	{
+		return (Flags & GFI_IOStoreFile) != 0;
 	}
 
 private:
@@ -478,13 +495,13 @@ enum EGame
 		GAME_Borderlands3 = GAME_UE4(20)+1,
 		// 4.21
 		GAME_Jedi = GAME_UE4(21)+1,
-		// 4.24
-		GAME_Dauntless = GAME_UE4(24)+1,
+		// 4.25
+		GAME_Dauntless = GAME_UE4(25)+1,
 
 	GAME_ENGINE    = 0xFFF0000	// mask for game engine
 };
 
-#define LATEST_SUPPORTED_UE4_VERSION		26		// UE4.XX
+#define LATEST_SUPPORTED_UE4_VERSION		27		// UE4.XX
 
 enum EPlatform
 {
@@ -959,6 +976,7 @@ public:
 	:	DataPtr((const byte*)data)
 	,	DataSize(size)
 	{
+		if (!data) appError("FMemReader constructed with NULL data");
 		IsLoading = true;
 		ArStopper = size;
 	}
@@ -1941,6 +1959,15 @@ protected:
 	}
 };
 
+// UE4 has TArrayView, which makes memory regior appearing as TArray.
+template<typename T>
+void CopyArrayView(TArray<T>& Destination, const void* Source, int Count)
+{
+	Destination.Empty(Count);
+	Destination.AddUninitialized(Count);
+	memcpy(Destination.GetData(), Source, Count * sizeof(T));
+}
+
 // Implementation of TArray serializer (part 3). Removing part 2 will cause some methods inaccessible.
 // Removing part 1 will cause function non-buildable. There's no problems when declaring serializer inside
 // TArray class, however this will not let us making custom TArray serializers for particular classes.
@@ -2001,7 +2028,7 @@ public:
 	}
 
 protected:
-	T		StaticData[N];
+	byte	StaticData[N * sizeof(T)];
 };
 
 #ifndef UMODEL_LIB_IN_NAMESPACE
@@ -2106,6 +2133,23 @@ template<typename TK, typename TV>
 class TMap : public TArray<TMapPair<TK, TV> >
 {
 public:
+	TV* Find(const TK& Key)
+	{
+		for (auto& It : *this)
+		{
+			if (It.Key == Key)
+			{
+				return &It.Value;
+			}
+		}
+		return NULL;
+	}
+
+	FORCEINLINE const TV* Find(const TK& Key) const
+	{
+		return const_cast<TMap*>(this)->Find(Key);
+	}
+
 	friend FORCEINLINE FArchive& operator<<(FArchive &Ar, TMap &Map)
 	{
 		return Ar << (TArray<TMapPair<TK, TV> >&)Map;
@@ -2223,6 +2267,7 @@ public:
 	void TrimStartAndEndInline();
 
 	FString& AppendChar(char ch);
+	FString& AppendChars(const char* s, int count);
 
 	FORCEINLINE void RemoveAt(int index, int count = 1)
 	{
@@ -2298,6 +2343,12 @@ public:
 		Data.DataPtr = (void*)&StaticData[0];
 		Data.MaxCount = N;
 		FString::operator=(src);
+	}
+	FORCEINLINE FStaticString(int count, const char* src)
+	{
+		Data.DataPtr = (void*)&StaticData[0];
+		Data.MaxCount = N;
+		AppendChars(src, count);
 	}
 	FORCEINLINE FStaticString(const FString& Other)
 	{
@@ -2583,47 +2634,44 @@ struct FIntBulkData : public FByteBulkData
 
 
 // UE3 compression flags; may be used for other engines, so keep it outside of #if UNREAL3 block
-#define COMPRESS_ZLIB		1
-#define COMPRESS_LZO		2
-#define COMPRESS_LZX		4
+#define COMPRESS_ZLIB				1
+#define COMPRESS_LZO				2
+#define COMPRESS_LZX				4
 
 #if BLADENSOUL
-#define COMPRESS_LZO_ENC_BNS	8					// encrypted LZO
+#define COMPRESS_LZO_ENC_BNS		8				// encrypted LZO
 #endif
 
 #if UNREAL4
-#define COMPRESS_Custom		4						// UE4.20-4.21
+#define COMPRESS_Custom				4				// UE4.20-4.21
 #endif // UNREAL4
 
 // Custom compression flags
-#define COMPRESS_FIND		0xFF					// use this flag for appDecompress when exact compression method is not known
+#define COMPRESS_FIND				0xFF			// use this flag for appDecompress when exact compression method is not known
 #if USE_LZ4
-#define COMPRESS_LZ4		0xFE					// custom umodel's constant
+#define COMPRESS_LZ4				0xFE			// custom umodel's constant
 #endif
 #if USE_OODLE
-#define COMPRESS_OODLE		0xFD					// custom umodel's constant
+#define COMPRESS_OODLE				0xFD			// custom umodel's constant
 #endif
 
 // Note: there's no conflicts between UE3 and UE4 flags - some obsoleve UE3 flags are marked as unused in UE4,
 // and some UE4 flags are missing in UE3 just because bitmask is not fully used there.
-#define PKG_Cooked           0x00000008				// UE3
-#define PKG_StoreCompressed	 0x02000000				// UE3, deprecated in UE4.16
-#define PKG_FilterEditorOnly 0x80000000				// UE4
+// UE3 flags
+#define PKG_Cooked					0x00000008		// UE3
+#define PKG_StoreCompressed			0x02000000		// UE3, deprecated in UE4.16
+// UE4 flags
+#define PKG_UnversionedProperties	0x00002000		// UE4.25+
+#define PKG_FilterEditorOnly		0x80000000		// UE4
 
 int appDecompress(byte *CompressedBuffer, int CompressedSize, byte *UncompressedBuffer, int UncompressedSize, int Flags);
 
 // UE4 has built-in AES encryption
 
-extern FString GAesKey;
+extern TArray<FString> GAesKeys;
 
 // Decrypt with arbitrary key
 void appDecryptAES(byte* Data, int Size, const char* Key, int KeyLen = -1);
-
-// Decrypt with GAesKey
-inline void appDecryptAES(byte* Data, int Size)
-{
-	appDecryptAES(Data, Size, *GAesKey, GAesKey.Len());
-}
 
 // Callback called when encrypted pak file is attempted to load
 bool UE4EncryptedPak();

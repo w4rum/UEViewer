@@ -19,7 +19,7 @@ volatile int CThread::NumThreads = 0;
 	Generic classes
 -----------------------------------------------------------------------------*/
 
-#if _WIN32
+#ifdef _WIN32
 
 // Windows.h has InterlockedIncrement/Decrement defines, hide then
 #undef InterlockedIncrement
@@ -36,15 +36,18 @@ CMutex::CMutex()
 {
 	static_assert(CriticalSectionSize >= sizeof(RTL_CRITICAL_SECTION), "Review CriticalSectionSize");
 	InitializeCriticalSection((LPCRITICAL_SECTION)&data);
+	bInitialized = true;
 }
 
 CMutex::~CMutex()
 {
+	bInitialized = false;
 	DeleteCriticalSection((LPCRITICAL_SECTION)&data);
 }
 
 void CMutex::Lock()
 {
+	if (!bInitialized) return; // not yet created, or already destroyed
 #if TRACY_DEBUG_MUTEX
 	bool b = tracy.BeforeLock();
 #endif
@@ -56,6 +59,7 @@ void CMutex::Lock()
 
 bool CMutex::TryLock()
 {
+	if (!bInitialized) return true; // not yet created, or already destroyed
 	bool bAcquired = TryEnterCriticalSection((LPCRITICAL_SECTION)&data) == 0;
 #if TRACY_DEBUG_MUTEX
 	tracy.AfterTryLock(bAcquired);
@@ -65,6 +69,7 @@ bool CMutex::TryLock()
 
 void CMutex::Unlock()
 {
+	if (!bInitialized) return; // not yet created, or already destroyed
 	LeaveCriticalSection((LPCRITICAL_SECTION)&data);
 #if TRACY_DEBUG_MUTEX
 	tracy.AfterUnlock();
@@ -106,13 +111,18 @@ void CSemaphore::Wait()
 CThread::CThread()
 {
 	InterlockedIncrement(&NumThreads);
-	thread = _beginthread(ThreadFunc, 0, this);
+	thread = _beginthreadex(NULL, 0, ThreadFunc, this, CREATE_SUSPENDED, NULL);
 }
 
 //todo: not called automatically when thread function completed
 CThread::~CThread()
 {
 	InterlockedDecrement(&NumThreads);
+}
+
+void CThread::Start()
+{
+	ResumeThread((HANDLE)thread);
 }
 
 /*static*/ int CThread::CurrentId()
@@ -152,25 +162,30 @@ CMutex::CMutex()
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
 	pthread_mutex_init((pthread_mutex_t*)&data, &attr);
 	pthread_mutexattr_destroy(&attr);
+	bInitialized = true;
 }
 
 CMutex::~CMutex()
 {
+	bInitialized = false;
 	pthread_mutex_destroy((pthread_mutex_t*)&data);
 }
 
 void CMutex::Lock()
 {
+	if (!bInitialized) return; // not yet created, or already destroyed
 	pthread_mutex_lock((pthread_mutex_t*)&data);
 }
 
 bool CMutex::TryLock()
 {
+	if (!bInitialized) return true; // not yet created, or already destroyed
 	return pthread_mutex_trylock((pthread_mutex_t*)&data) == 0;
 }
 
 void CMutex::Unlock()
 {
+	if (!bInitialized) return; // not yet created, or already destroyed
 	pthread_mutex_unlock((pthread_mutex_t*)&data);
 }
 
@@ -197,6 +212,7 @@ void CSemaphore::Wait()
 
 CThread::CThread()
 {
+	bStarted = false;
 	InterlockedIncrement(&NumThreads);
 	static_assert(sizeof(thread) >= sizeof(pthread_t), "Review ThreadSize");
 	typedef void* (*start_routine_t)(void*);
@@ -206,6 +222,11 @@ CThread::CThread()
 CThread::~CThread()
 {
 	InterlockedDecrement(&NumThreads);
+}
+
+void CThread::Start()
+{
+	bStarted = true;
 }
 
 /*static*/ int CThread::CurrentId()
@@ -228,10 +249,24 @@ CThread::~CThread()
 
 #endif // windows / linux
 
+#ifdef _WIN32
+/*static*/ unsigned __stdcall CThread::ThreadFunc(void* param)
+#else
 /*static*/ void CThread::ThreadFunc(void* param)
+#endif
 {
 	TRY {
 		CThread* thread = (CThread*)param;
+
+#ifndef _WIN32
+		// Wait for thread to start. Pthreads doesn't have "create suspended" flag, so wait manually.
+		while (!thread->bStarted)
+		{
+			Sleep(0);
+		}
+#endif // !_WIN32
+
+		// Execute thread function
 		thread->Run();
 	} CATCH_CRASH {
 		// Lock other threads - only one will raise the error
@@ -249,6 +284,10 @@ CThread::~CThread()
 
 		exit(1);
 	}
+
+#ifdef _WIN32
+	return 0;
+#endif
 }
 
 
@@ -465,9 +504,12 @@ CPoolThread* AllocateFreeThread()
 	if (NumPoolThreads < MaxThreads)
 	{
 		CPoolThread* NewThread = new CPoolThread();
+
 		NewThread->bBusy = true;
 		Pool[NumPoolThreads++] = NewThread;
 		InterlockedIncrement(&CPoolThread::NumWorkingThreads);
+
+		NewThread->Start();
 		return NewThread;
 	}
 

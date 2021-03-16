@@ -434,6 +434,45 @@ float CQuat::GetLength() const
 }
 
 
+// References:
+// - UE4: UnrealMath.cpp, FindBetween_Helper()
+// - http://lolengine.net/blog/2014/02/24/quaternion-from-two-vectors-final
+void CQuat::FromTwoVectors(const CVec3& v1, const CVec3& v2)
+{
+	float norm_u_norm_v = sqrt(dot(v1, v1) * dot(v2, v2));
+	float w = norm_u_norm_v + dot(v1, v1);
+
+	CQuat& result = *this;
+	if (w < 1e-6f * norm_u_norm_v)
+	{
+		// If u and v are exactly opposite, rotate 180 degrees
+		// around an arbitrary orthogonal axis. Axis normalisation
+		// can happen later, when we normalise the quaternion.
+		w = 0.0f;
+		if (fabs(v1.x) > fabs(v1.y))
+			result.Set(-v1.z, 0.0f, v1.x, w);
+		else
+			result.Set(0.0f, -v1.z, v1.y, w);
+    }
+    else
+    {
+		// Otherwise, build quaternion the standard way.
+		cross(v1, v2, (CVec3&)result.x);
+		result.w = w;
+    }
+
+	result.Normalize();
+}
+
+
+void CQuat::RotateVector(const CVec3& src, CVec3& dst) const
+{
+	CAxis axis;
+	ToAxis(axis);
+	axis.TransformVector(src, dst);
+}
+
+
 void CQuat::Normalize()
 {
 	float len = GetLength();
@@ -510,4 +549,43 @@ void Slerp(const CQuat &A, const CQuat &B, float Alpha, CQuat &dst)
 	dst.y = scaleA * A.y + scaleB * B.y;
 	dst.z = scaleA * A.z + scaleB * B.z;
 	dst.w = scaleA * A.w + scaleB * B.w;
+}
+
+// Convert angle to -180...+180 range
+static float NormalizeAxis(float angle)
+{
+	angle = fmod(angle, 360.0f);
+	if (angle > 180.0f)
+		angle -= 360.0f;
+	return angle;
+}
+
+void Quat2Euler(const CQuat& quat, CVec3& angles)
+{
+	// Reference: FQuat::Rotator() in UE4
+	const float SingularityTest = quat.z * quat.x- quat.w * quat.y;
+	const float YawY = 2.0f * (quat.w * quat.z + quat.x * quat.y);
+	const float YawX = 1.0f - 2.0f * (quat.y * quat.y + quat.z * quat.z);
+
+	const float SINGULARITY_THRESHOLD = 0.4999995f;
+	const float RAD_TO_DEG = (180.0f) / M_PI;
+
+	if (SingularityTest < -SINGULARITY_THRESHOLD)
+	{
+		angles[PITCH] = -90.0f;
+		angles[YAW]   = atan2(YawY, YawX) * RAD_TO_DEG;
+		angles[ROLL]  = NormalizeAxis(-angles[YAW] - (2.0f * atan2(quat.x, quat.w) * RAD_TO_DEG));
+	}
+	else if (SingularityTest > SINGULARITY_THRESHOLD)
+	{
+		angles[PITCH] = 90.0f;
+		angles[YAW]   = atan2(YawY, YawX) * RAD_TO_DEG;
+		angles[ROLL]  = NormalizeAxis(angles[YAW] - (2.0f * atan2(quat.x, quat.w) * RAD_TO_DEG));
+	}
+	else
+	{
+		angles[PITCH] = asin(2.0f * SingularityTest) * RAD_TO_DEG;
+		angles[YAW]   = atan2(YawY, YawX) * RAD_TO_DEG;
+		angles[ROLL]  = atan2(-2.0f * (quat.w * quat.x + quat.y * quat.z), (1.0f - 2.0f * (quat.x * quat.x + quat.y * quat.y))) * RAD_TO_DEG;
+	}
 }

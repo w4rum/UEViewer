@@ -32,7 +32,11 @@ template<class T> inline T Lerp(const T& A, const T& B, float Alpha)
 
 struct CVec3
 {
-	float	v[3];
+	union
+	{
+		float v[3];
+		struct { float x, y, z; };
+	};
 	// access to data
 	inline float& operator[](int index)
 	{
@@ -238,22 +242,6 @@ void InvertCoordsSlow(const CCoords &S, CCoords &D);				// any S
 // a += scale * b
 void CoordsMA(CCoords &a, float scale, const CCoords &b);
 
-/*-----------------------------------------------------------------------------
-	Angle math
------------------------------------------------------------------------------*/
-
-// angle indexes
-enum
-{
-	PITCH,							// looking up and down (0=Straight Ahead, +Up, -Down).
-	YAW,							// rotating around (running in circles), 0=East, +North, -South.
-	ROLL							// rotation about axis of screen, 0=Straight, +Clockwise, -CCW.
-};
-
-void  Euler2Vecs(const CVec3 &angles, CVec3 *forward, CVec3 *right, CVec3 *up);
-void  Vec2Euler(const CVec3 &vec, CVec3 &angles);
-float Vec2Yaw(const CVec3 &vec);
-
 
 /*-----------------------------------------------------------------------------
 	Some constants
@@ -282,6 +270,11 @@ struct CQuat
 	void ToAxis(CAxis &dst) const;
 	float GetLength() const;
 
+	// Build a unit quaternion representing the rotation from v1 to v2. The input vectors need not be normalized.
+	void FromTwoVectors(const CVec3& v1, const CVec3& v2);
+
+	void RotateVector(const CVec3& src, CVec3& dst) const;
+
 	inline void Conjugate()
 	{
 		FNegate(x);
@@ -300,5 +293,24 @@ struct CQuat
 };
 
 void Slerp(const CQuat &A, const CQuat &B, float Alpha, CQuat &dst);
+
+
+/*-----------------------------------------------------------------------------
+	Angle math
+-----------------------------------------------------------------------------*/
+
+// angle indexes
+enum
+{
+	PITCH,							// looking up and down (0=Straight Ahead, +Up, -Down).
+	YAW,							// rotating around (running in circles), 0=East, +North, -South.
+	ROLL							// rotation about axis of screen, 0=Straight, +Clockwise, -CCW.
+};
+
+void Euler2Vecs(const CVec3 &angles, CVec3 *forward, CVec3 *right, CVec3 *up);
+void Vec2Euler(const CVec3 &vec, CVec3 &angles);
+float Vec2Yaw(const CVec3 &vec);
+void Quat2Euler(const CQuat& quat, CVec3& angles);
+
 
 #endif // __MATH_3D_H__

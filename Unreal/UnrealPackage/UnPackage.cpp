@@ -249,12 +249,11 @@ void FObjectImport::Serialize(FArchive& Ar)
 
 UnPackage::UnPackage(const char *filename, const CGameFileInfo* fileInfo, bool silent)
 :	Loader(NULL)
+#if UNREAL4
+,	ExportIndices_IOS(NULL)
+#endif
 {
 	guard(UnPackage::UnPackage);
-
-#if PROFILE_PACKAGE_TABLES
-	appResetProfiler();
-#endif
 
 	IsLoading = true;
 	FileInfo = fileInfo;
@@ -279,12 +278,42 @@ UnPackage::UnPackage(const char *filename, const CGameFileInfo* fileInfo, bool s
 
 	SetupFrom(*Loader);
 
+#if UNREAL4
+	if (FileInfo && FileInfo->IsIOStoreFile())
+	{
+		// Not called (forced UE4.26):
+		// - May be: UE4UnversionedPackage(verMin, verMax)
+		// - Ar.DetectGame();
+		this->ArVer = 0;
+		this->ArLicenseeVer = 0;
+		this->Game = GForceGame ? GForceGame : GAME_UE4(26); // appeared in UE4.26
+		OverrideVersion();
+		// Register package before loading, because it is possible that during
+		// loading of import table we'll load other packages to resolve dependencies,
+		// and circular dependencies are possible
+		RegisterPackage(filename);
+		LoadPackageIoStore();
+		// Release package file handle
+		CloseReader();
+		if (!IsValid())
+		{
+			UnregisterPackage();
+		}
+		return;
+	}
+#endif // UNREAL4
+
 	// read summary
 	if (!Summary.Serialize(*this))
 	{
 		// Probably not a package
+		CloseReader();
 		return;
 	}
+
+#if PROFILE_PACKAGE_TABLES
+	appResetProfiler();
+#endif
 
 	Loader->SetupFrom(*this);	// serialization of FPackageFileSummary could change some FArchive properties
 
@@ -380,6 +409,20 @@ UnPackage::UnPackage(const char *filename, const CGameFileInfo* fileInfo, bool s
 	}
 #endif // UNREAL4
 
+	RegisterPackage(filename);
+
+	// Release package file handle
+	CloseReader();
+
+#if PROFILE_PACKAGE_TABLES
+	appPrintProfiler("Package loaded");
+#endif
+
+	unguardf("%s, ver=%d/%d, game=%s", filename, ArVer, ArLicenseeVer, GetGameTag(Game));
+}
+
+void UnPackage::RegisterPackage(const char* filename)
+{
 	// Register self to package map.
 	// First, strip path and extension from the name.
 	char buf[MAX_PACKAGE_PATH];
@@ -393,14 +436,28 @@ UnPackage::UnPackage(const char *filename, const CGameFileInfo* fileInfo, bool s
 	// ... then add 'this'
 	PackageMap.Add(this);
 
-	// Release package file handle
-	CloseReader();
+	// Cache pointer in CGameFileInfo so next time it will be found quickly.
+	if (FileInfo)
+	{
+		const_cast<CGameFileInfo*>(FileInfo)->Package = this;
+	}
+}
 
-#if PROFILE_PACKAGE_TABLES
-	appPrintProfiler("Package loaded");
-#endif
-
-	unguardf("%s, ver=%d/%d, game=%s", filename, ArVer, ArLicenseeVer, GetGameTag(Game));
+void UnPackage::UnregisterPackage()
+{
+	// Remove self from package table (it will be there even if package is not "valid")
+	int i = PackageMap.FindItem(this);
+	if (i != INDEX_NONE)
+	{
+		// Could be INDEX_NONE in a case of bad package
+		PackageMap.RemoveAt(i);
+	}
+	// unlink package from CGameFileInfo
+	if (FileInfo)
+	{
+		assert(FileInfo->Package == this || FileInfo->Package == NULL);
+		const_cast<CGameFileInfo*>(FileInfo)->Package = NULL;
+	}
 }
 
 bool UnPackage::VerifyName(FString& nameStr, int nameIndex)
@@ -492,6 +549,7 @@ void UnPackage::LoadExportTable()
 
 	Seek(Summary.ExportOffset);
 	FObjectExport *Exp = ExportTable = new FObjectExport[Summary.ExportCount];
+	memset(ExportTable, 0, sizeof(FObjectExport) * Summary.ExportCount);
 	for (int i = 0; i < Summary.ExportCount; i++, Exp++)
 	{
 		*this << *Exp;
@@ -512,9 +570,9 @@ void UnPackage::LoadExportTable()
 	{
 //		USE_COMPACT_PACKAGE_STRUCTS - makes impossible to dump full information
 //		Perhaps add full support to extract.exe?
-//		PKG_LOG("Export[%d]: %s'%s' offs=%08X size=%08X parent=%d flags=%08X:%08X, exp_f=%08X arch=%d\n", i, GetObjectName(Exp->ClassIndex),
+//		PKG_LOG("Export[%d]: %s'%s' offs=%08X size=%08X parent=%d flags=%08X:%08X, exp_f=%08X arch=%d\n", i, GetClassNameFor(*Exp),
 //			*Exp->ObjectName, Exp->SerialOffset, Exp->SerialSize, Exp->PackageIndex, Exp->ObjectFlags2, Exp->ObjectFlags, Exp->ExportFlags, Exp->Archetype);
-		PKG_LOG("Export[%d]: %s'%s' offs=%08X size=%08X parent=%d  exp_f=%08X\n", i, GetObjectName(Exp->ClassIndex),
+		PKG_LOG("Export[%d]: %s'%s' offs=%08X size=%08X parent=%d  exp_f=%08X\n", i, GetClassNameFor(*Exp),
 			*Exp->ObjectName, Exp->SerialOffset, Exp->SerialSize, Exp->PackageIndex, Exp->ExportFlags);
 	}
 #endif // DEBUG_PACKAGE
@@ -527,19 +585,9 @@ UnPackage::~UnPackage()
 {
 	guard(UnPackage::~UnPackage);
 
-	// Remove self from package table (it will be there even if package is not "valid")
-	int i = PackageMap.FindItem(this);
-	if (i != INDEX_NONE)
-	{
-		// Could be INDEX_NONE in a case of bad package
-		PackageMap.RemoveAt(i);
-	}
-	// unlink package from CGameFileInfo
-	if (FileInfo)
-	{
-		assert(FileInfo->Package == this || FileInfo->Package == NULL);
-		const_cast<CGameFileInfo*>(FileInfo)->Package = NULL;
-	}
+	UnregisterPackage();
+
+	if (Loader) delete Loader;
 
 	if (!IsValid())
 	{
@@ -549,10 +597,12 @@ UnPackage::~UnPackage()
 	}
 
 	// free tables
-	if (Loader) delete Loader;
 	delete[] NameTable;
 	delete[] ImportTable;
 	delete[] ExportTable;
+#if UNREAL4
+	delete[] ExportIndices_IOS;
+#endif
 
 	unguard;
 }
@@ -600,6 +650,15 @@ void UnPackage::SetupReader(int ExportIndex)
 	}
 	// setup for object
 	const FObjectExport &Exp = GetExport(ExportIndex);
+
+#if UNREAL4
+	if (Exp.RealSerialOffset)
+	{
+		FReaderWrapper* Wrapper = Loader->CastTo<FReaderWrapper>();
+		Wrapper->ArPosOffset = Exp.RealSerialOffset - Exp.SerialOffset;
+	}
+#endif // UNREAL4
+
 	SetStopper(Exp.SerialOffset + Exp.SerialSize);
 //	appPrintf("Setup for %s: %d + %d -> %d\n", *Exp.ObjectName, Exp.SerialOffset, Exp.SerialSize, Exp.SerialOffset + Exp.SerialSize);
 	Seek(Exp.SerialOffset);
@@ -755,7 +814,7 @@ FArchive& UnPackage::operator<<(UObject *&Obj)
 	else if (index > 0)
 	{
 //		const FObjectExport &Exp = GetExport(index-1);
-//		appPrintf("PKG: Export[%d] OBJ=%s CLS=%s\n", index, *Exp.ObjectName, GetObjectName(Exp.ClassIndex));
+//		appPrintf("PKG: Export[%d] OBJ=%s CLS=%s\n", index, *Exp.ObjectName, GetClassNameFor(Exp));
 		Obj = CreateExport(index-1);
 	}
 	else // index == 0
@@ -785,7 +844,7 @@ int UnPackage::FindExport(const char *name, const char *className, int firstInde
 		if (cmp(Exp.ObjectName))
 		{
 			// if class name specified - compare it too
-			const char *foundClassName = GetObjectName(Exp.ClassIndex);
+			const char* foundClassName = GetClassNameFor(Exp);
 			if (className && (foundClassName != className)) // pointer comparison again
 				continue;
 			return i;
@@ -921,7 +980,7 @@ UObject* UnPackage::CreateExport(int index)
 	}
 
 	// Create empty object of desired class
-	const char* ClassName = GetObjectName(Exp.ClassIndex);
+	const char* ClassName = GetClassNameFor(Exp);
 	UObject* Obj = Exp.Object = CreateClass(ClassName);
 	if (!Obj)
 	{
@@ -985,7 +1044,7 @@ UObject* UnPackage::CreateExport(int index)
 			Outer = OuterExp.Object;
 			if (!Outer)
 			{
-				const char* OuterClassName = GetObjectName(OuterExp.ClassIndex);
+				const char* OuterClassName = GetClassNameFor(OuterExp);
 				if (IsKnownClass(OuterClassName))			// avoid error message if class name is not registered
 					Outer = CreateExport(Exp.PackageIndex - 1);
 			}
@@ -1013,7 +1072,14 @@ UObject* UnPackage::CreateImport(int index)
 	if (Imp.Missing) return NULL;	// error message already displayed for this entry
 
 	// load package
-	const char *PackageName = GetObjectPackageName(Imp.PackageIndex);
+	const char* PackageName = GetObjectPackageName(Imp.PackageIndex);
+#if UNREAL4
+	if (!PackageName)
+	{
+		// This could happen with UE4 IoStore structures, if PackageId was not found
+		return NULL;
+	}
+#endif
 	UnPackage *Package = LoadPackage(PackageName);
 	int ObjIndex = INDEX_NONE;
 
@@ -1149,7 +1215,6 @@ void UnPackage::GetFullExportName(const FObjectExport &Exp, char *buf, int bufSi
 		}
 		else
 		{
-			// possible for UE3 forced exports
 			const FObjectExport &Rec = GetExport(PackageIndex-1);
 			PackageIndex = Rec.PackageIndex;
 			PackageName  = Rec.ObjectName;
@@ -1270,7 +1335,7 @@ TArray<char*>		MissingPackages;
 	guard(UnPackage::LoadPackage(info));
 	PROFILE_LABEL(*File->GetRelativeName());
 
-	if (File->IsPackage)
+	if (File->IsPackage())
 	{
 		// Check if package was already loaded.
 		if (File->Package)
@@ -1282,8 +1347,6 @@ TArray<char*>		MissingPackages;
 			delete package;
 			return NULL;
 		}
-		// Cache pointer in CGameFileInfo so next time it will be found quickly.
-		const_cast<CGameFileInfo*>(File)->Package = package;
 		return package;
 	}
 	return NULL;

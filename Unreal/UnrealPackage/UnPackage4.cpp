@@ -1,10 +1,13 @@
 #include "Core.h"
-#include "UnCore.h"
-#include "UnPackage.h"
 
 #if UNREAL4
 
+#include "UnCore.h"
+#include "UnPackage.h"
 #include "UE4Version.h"
+
+#include "FileSystem/GameFileSystem.h"		// just required for next header
+#include "FileSystem/IOStoreFileSystem.h"	// for FindPackageById()
 
 struct FEnumCustomVersion
 {
@@ -194,7 +197,7 @@ void FPackageFileSummary::Serialize4(FArchive &Ar)
 	// guid
 	Ar << Guid;
 
-	if (Ar.ArVer >= VER_UE4_ADDED_PACKAGE_OWNER && Ar.ContainsEditorData())
+	if (Ar.ArVer >= VER_UE4_ADDED_PACKAGE_OWNER && Ar.ArVer < VER_UE4_NON_OUTER_PACKAGE_IMPORT && Ar.ContainsEditorData())
 	{
 		FGuid PersistentGuid, OwnerPersistentGuid;
 		Ar << PersistentGuid << OwnerPersistentGuid;
@@ -402,6 +405,591 @@ void UnPackage::LoadNameTable4()
 #endif
 		unguardf("%d", i);
 	}
+
+	unguard;
+}
+
+/*-----------------------------------------------------------------------------
+	IO Store AsyncPackage
+-----------------------------------------------------------------------------*/
+
+struct FMappedName
+{
+	uint32 NameIndex;
+	uint32 ExtraIndex;
+
+	const char* ToString(const char** NameTable) const
+	{
+		if (ExtraIndex == 0)
+			return NameTable[NameIndex];
+		return appStrdupPool(va("%s_%d", NameTable[NameIndex], ExtraIndex - 1));
+	}
+};
+
+struct FPackageObjectIndex
+{
+	uint64 Value;
+
+	FORCEINLINE bool IsNull() const
+	{
+		return (Value >> 62) == 3; // FPackageObjectIndex::Null, original code check whole value to be -1
+	}
+
+	FORCEINLINE bool IsExport() const
+	{
+		return (Value >> 62) == 0; // FPackageObjectIndex::Export
+	}
+
+	FORCEINLINE bool IsScriptImport() const
+	{
+		return (Value >> 62) == 1;
+	}
+
+	FORCEINLINE bool IsImport() const
+	{
+		return (Value >> 62) == 2; // original function does '|| IsScriptImport()'
+	}
+};
+
+struct FPackageSummary
+{
+	FMappedName Name;
+	FMappedName SourceName;
+	uint32 PackageFlags;
+	uint32 CookedHeaderSize;
+	int32 NameMapNamesOffset;
+	int32 NameMapNamesSize;
+	int32 NameMapHashesOffset;
+	int32 NameMapHashesSize;
+	int32 ImportMapOffset;
+	int32 ExportMapOffset;
+	int32 ExportBundlesOffset;
+	int32 GraphDataOffset;
+	int32 GraphDataSize;
+	int32 Pad;
+};
+
+struct FExportMapEntry
+{
+	uint64 CookedSerialOffset;
+	uint64 CookedSerialSize;
+	FMappedName ObjectName;
+	FPackageObjectIndex OuterIndex;
+	FPackageObjectIndex ClassIndex;
+	FPackageObjectIndex SuperIndex;
+	FPackageObjectIndex TemplateIndex;
+	FPackageObjectIndex GlobalImportIndex;
+	uint32 ObjectFlags;	// EObjectFlags
+	uint8 FilterFlags;	// EExportFilterFlags: client/server flags
+	uint8 Pad[3];
+};
+
+struct FExportBundleHeader
+{
+	uint32 FirstEntryIndex;
+	uint32 EntryCount;
+};
+
+struct FExportBundleEntry
+{
+	enum EExportCommandType
+	{
+		ExportCommandType_Create,
+		ExportCommandType_Serialize,
+	};
+	uint32 LocalExportIndex;
+	uint32 CommandType;
+};
+
+struct FScriptObjectEntry
+{
+	FMappedName ObjectName; // FMinimalName
+	FPackageObjectIndex GlobalIndex;
+	FPackageObjectIndex OuterIndex;
+	FPackageObjectIndex CDOClassIndex;
+};
+
+struct CImportTableErrorStats
+{
+	uint32 TotalPackages;
+	uint32 MissedPackages;
+	uint32 MissedImports;
+
+	CImportTableErrorStats()
+	: TotalPackages(0)
+	, MissedPackages(0)
+	, MissedImports(0)
+	{}
+};
+
+static void LoadGraphData(const byte* Data, int DataSize, TArray<const CGameFileInfo*>& OutPackages, CImportTableErrorStats& Stats)
+{
+	guard(LoadGraphData);
+
+	const byte* DataEnd = Data + DataSize;
+	int32 PackageCount = *(int32*)Data;
+	if (PackageCount == 0) return;
+	Stats.TotalPackages += PackageCount;
+
+	Data += sizeof(int32);
+	OutPackages.Reserve(OutPackages.Num() + PackageCount);
+
+	for (int PackageIndex = 0; PackageIndex < PackageCount; PackageIndex++)
+	{
+		FPackageId PackageId = *(FPackageId*)Data;
+		Data += sizeof(FPackageId);
+		int32 BundleCount = *(int32*)Data;
+		Data += sizeof(int32);
+		// Skip bundle information
+		Data += BundleCount * (sizeof(int32) + sizeof(int32));
+
+		// Find the package
+		const CGameFileInfo* File = FindPackageById(PackageId);
+		if (File)
+		{
+			OutPackages.Add(File);
+		#if DEBUG_PACKAGE
+			appPrintf("Depends: %s\n", *File->GetRelativeName());
+		#endif
+		}
+		else
+		{
+		#if DEBUG_PACKAGE
+			appPrintf("Can't locate package with Id %llX\n", PackageId);
+		#endif
+			Stats.MissedPackages++;
+		}
+	}
+
+	assert(Data == DataEnd);
+
+	unguard;
+}
+
+// Reference: AsyncLoading2.cpp, FAsyncPackage2::Event_ProcessPackageSummary()
+void UnPackage::LoadPackageIoStore()
+{
+	guard(UnPackage::LoadPackageIoStore);
+
+#if DEBUG_PACKAGE
+	appPrintf("Loading AsyncPackage %s\n", *GetFilename());
+#endif
+
+	FPackageSummary Sum;
+	Loader->Serialize(&Sum, sizeof(Sum));
+
+	Summary.PackageFlags = Sum.PackageFlags;
+
+	// Rewind Loader to zero and load whole header (including summary)
+	int HeaderSize = Sum.GraphDataOffset + Sum.GraphDataSize;
+	byte* HeaderData = new byte[HeaderSize];
+	Loader->Seek(0);
+	Loader->Serialize(HeaderData, HeaderSize);
+
+	FMemReader Reader(HeaderData, HeaderSize);
+	Reader.SetupFrom(*Loader);
+
+	// Load name table
+	// Sum.NameMapHashesOffset points to 'uint64 HashVersion' followed by hashes.
+	// Current HashVersion = 0xC1640000.
+	int NameCount = Sum.NameMapHashesSize / sizeof(uint64) - 1;
+	LoadNameTableIoStore(HeaderData + Sum.NameMapNamesOffset, NameCount, Sum.NameMapNamesSize);
+
+	// Process export bundles
+
+	// Compute number of export bundle headers, so we could locate entries. In UE4, this information
+	// is stored in global package store, we're not loading it. The idea: compute number of bundle entries
+	// which could fit the buffer. The start iterating data from the start, with processing bundle headers.
+	// When we'll get the number of bundle entries accumulated from headers matching the size of remaining
+	// buffer, stop.
+	const FExportBundleHeader* BundleHeaders = (FExportBundleHeader*)(HeaderData + Sum.ExportBundlesOffset);
+	int RemainingBundleEntryCount = (Sum.GraphDataOffset - Sum.ExportBundlesOffset) / sizeof(FExportBundleEntry);
+	int FoundBundlesCount = 0;
+	const FExportBundleHeader* CurrentBundleHeader = BundleHeaders;
+	while (FoundBundlesCount < RemainingBundleEntryCount)
+	{
+		// This location is occupied by header, so it is not a bundle entry
+		RemainingBundleEntryCount--;
+		FoundBundlesCount += CurrentBundleHeader->EntryCount;
+		CurrentBundleHeader++;
+	}
+	assert(FoundBundlesCount == RemainingBundleEntryCount);
+	// Load export bundles into arrays
+	TArray<FExportBundleHeader> BundleHeadersArray;
+	TArray<FExportBundleEntry> BundleEntriesArray;
+	CopyArrayView(BundleHeadersArray, BundleHeaders, CurrentBundleHeader - BundleHeaders);
+	CopyArrayView(BundleEntriesArray, (FExportBundleEntry*)CurrentBundleHeader, FoundBundlesCount);
+
+	// Load export table
+	// UE4 doesn't compute export count, it uses it from global package store
+	int ExportTableSize = Sum.ExportBundlesOffset - Sum.ExportMapOffset;
+	assert(ExportTableSize % sizeof(FExportMapEntry) == 0);
+	int ExportCount = ExportTableSize / sizeof(FExportMapEntry);
+	LoadExportTableIoStore(HeaderData + Sum.ExportMapOffset, ExportCount, ExportTableSize, HeaderSize, BundleHeadersArray, BundleEntriesArray);
+
+	// Load import table
+	// Should scan graph first to get list of packages we depends on
+	TStaticArray<const CGameFileInfo*, 32> ImportPackages;
+	CImportTableErrorStats ErrorStats;
+	LoadGraphData(HeaderData + Sum.GraphDataOffset, Sum.GraphDataSize, ImportPackages, ErrorStats);
+	int ImportMapSize = Sum.ExportMapOffset - Sum.ImportMapOffset;
+	int ImportCount = ImportMapSize / sizeof(FPackageObjectIndex);
+	LoadImportTableIoStore(HeaderData + Sum.ImportMapOffset, ImportCount, ImportPackages, ErrorStats);
+
+	// All headers were processed, delete the buffer
+	delete[] HeaderData;
+
+	if (ErrorStats.MissedPackages && ErrorStats.MissedImports)
+	{
+		appPrintf("%s: missed %d imports from %d/%d unknown packages\n",
+			*GetFilename(),
+			ErrorStats.MissedImports, ErrorStats.MissedPackages, ErrorStats.TotalPackages);
+	}
+
+	// Replace loader, so we'll be able to adjust offset in UnPackage::SetupReader()
+	FArchive* NewLoader = new FReaderWrapper(Loader, 0);
+	NewLoader->SetupFrom(*this);
+	Loader = NewLoader;
+
+	unguard;
+}
+
+static void SerializeFNameSerializedView(const byte*& Data, FString& Str)
+{
+	// FSerializedNameHeader
+	int Len = ((Data[0] & 0x7F) << 8) | Data[1];
+	bool isUnicode = (Data[0] & 0x80) != 0;
+	assert(!isUnicode);
+	Data += 2;
+
+	Str.GetDataArray().SetNumUninitialized(Len + 1);
+	memcpy(&Str[0], Data, Len);
+	Str[Len] = 0;
+	Data += Len;
+}
+
+// Reference: UnrealNames.cpp, LoadNameBatch()
+void UnPackage::LoadNameTableIoStore(const byte* Data, int NameCount, int TableSize)
+{
+	guard(UnPackage::LoadNameTableIoStore);
+
+	Summary.NameCount = NameCount;
+	NameTable = new const char* [NameCount];
+
+	const byte* EndPosition = Data + TableSize;
+	for (int i = 0; i < NameCount; i++)
+	{
+		FStaticString<MAX_FNAME_LEN> NameStr;
+		SerializeFNameSerializedView(Data, NameStr);
+		NameTable[i] = appStrdupPool(*NameStr);
+	}
+	assert(Data == EndPosition);
+
+	unguard;
+}
+
+// Forward
+const char* FindScriptEntryName(const FPackageObjectIndex& ObjectIndex);
+
+void UnPackage::LoadExportTableIoStore(const byte* Data, int ExportCount, int TableSize, int PackageHeaderSize,
+	const TArray<FExportBundleHeader>& BundleHeaders, const TArray<FExportBundleEntry>& BundleEntries)
+{
+	guard(UnPackage::LoadExportTableIoStore);
+
+	Summary.ExportCount = ExportCount;
+	ExportTable = new FObjectExport[ExportCount];
+	memset(ExportTable, 0, sizeof(FObjectExport) * ExportCount);
+
+	ExportIndices_IOS = new FPackageObjectIndex[ExportCount];
+
+	const FExportMapEntry* ExportEntries = (FExportMapEntry*)Data;
+
+	// Export data is ordered according to export bundles, so we should do the processing in bundle order
+	int32 CurrentExportOffset = PackageHeaderSize;
+	for (const FExportBundleHeader& BundleHeader : BundleHeaders)
+	{
+		for (int EntryIndex = 0; EntryIndex < BundleHeader.EntryCount; EntryIndex++)
+		{
+			const FExportBundleEntry& Entry = BundleEntries[BundleHeader.FirstEntryIndex + EntryIndex];
+			if (Entry.CommandType == FExportBundleEntry::ExportCommandType_Serialize)
+			{
+				unsigned ObjectIndex = Entry.LocalExportIndex;
+				assert(ObjectIndex < ExportCount);
+
+				const FExportMapEntry& E = ExportEntries[ObjectIndex];
+				FObjectExport& Exp = ExportTable[ObjectIndex];
+
+				// TODO: FExportMapEntry has FilterFlags which could affect inclusion of exports
+				assert(E.CookedSerialOffset < 0x7FFFFFFF);
+				assert(E.CookedSerialSize < 0x7FFFFFFF);
+				Exp.SerialOffset = (int32)E.CookedSerialOffset;
+				Exp.SerialSize = (int32)E.CookedSerialSize;
+				Exp.ObjectName.Str = E.ObjectName.ToString(NameTable);
+				Exp.ClassName_IO = FindScriptEntryName(E.ClassIndex);
+				// Store "real" offset
+				Exp.RealSerialOffset = CurrentExportOffset;
+				CurrentExportOffset += Exp.SerialSize;
+				// OuterIndex is just a position in current export table, pointing at outer object
+				int64 OuterIndex = int64(E.OuterIndex.Value + 1);
+				assert(OuterIndex >= 0 && OuterIndex <= ExportCount);
+				Exp.PackageIndex = int(OuterIndex);
+
+				// Save GlobalImportIndex in separate array
+				ExportIndices_IOS[ObjectIndex] = E.GlobalImportIndex;
+			#if DEBUG_PACKAGE
+				appPrintf("Exp[%d]: %s'%s' Flags=%X SerialOff=%X RealOff=%X Id=%I64X Parent=%I64d\n", ObjectIndex, Exp.ClassName_IO, *Exp.ObjectName,
+					E.ObjectFlags, Exp.SerialOffset, Exp.RealSerialOffset,
+					E.GlobalImportIndex.Value, E.OuterIndex.Value);
+			#endif
+			}
+		}
+	}
+
+	unguard;
+}
+
+struct ImportHelper
+{
+	const TArray<const CGameFileInfo*>& PackageFiles;
+	TStaticArray<UnPackage*, 32> Packages;
+	TStaticArray<int, 32> AllocatedPackageImports;
+	FObjectImport* ImportTable;
+	const FPackageObjectIndex* ImportMap;
+	int ImportCount;
+	int NextImportToCheck;
+
+	ImportHelper(const TArray<const CGameFileInfo*>& InPackageFiles, FObjectImport* InImportTable, const FPackageObjectIndex* InImportMap, int InImportCount)
+	: PackageFiles(InPackageFiles)
+	, ImportTable(InImportTable)
+	, ImportMap(InImportMap)
+	, ImportCount(InImportCount)
+	, NextImportToCheck(0)
+	{
+		int NumPackages = PackageFiles.Num();
+		Packages.Reserve(NumPackages);
+		AllocatedPackageImports.Init(-1, NumPackages);
+		// Preload dependencies
+		for (const CGameFileInfo* File : PackageFiles)
+		{
+			Packages.Add(UnPackage::LoadPackage(File, true));
+		}
+	}
+
+	// Find or create FObjectImport for package specified by its index
+	int GetPackageImportIndex(int PackageIndex)
+	{
+		int Index = AllocatedPackageImports[PackageIndex];
+		if (Index >= 0)
+		{
+			// Already allocated
+			return Index;
+		}
+		Index = FindNullImportEntry();
+		AllocatedPackageImports[PackageIndex] = Index;
+
+		const CGameFileInfo* PackageFile = PackageFiles[PackageIndex];
+		FObjectImport& Imp = ImportTable[Index];
+		// Get the package file name and cut extension
+		FStaticString<MAX_PACKAGE_PATH> PackageName;
+		PackageFile->GetRelativeName(PackageName);
+		char* Ext = strrchr(&PackageName[0], '.');
+		if (Ext) *Ext = 0;
+		Imp.ObjectName.Str = appStrdupPool(*PackageName); // it should be already in pool
+		Imp.ClassName.Str = "Package";
+
+		return Index;
+	}
+
+	bool FindObjectInPackages(FPackageObjectIndex ObjectIndex, int& OutPackageIndex, const FObjectExport*& OutExportEntry) const
+	{
+		for (int PackageIndex = 0; PackageIndex < Packages.Num(); PackageIndex++)
+		{
+			const UnPackage* ImportPackage = Packages[PackageIndex];
+			assert(ImportPackage);
+			for (int i = 0; i < ImportPackage->Summary.ExportCount; i++)
+			{
+				if (ImportPackage->ExportIndices_IOS[i].Value == ObjectIndex.Value)
+				{
+					// Found
+					OutPackageIndex = PackageIndex;
+					OutExportEntry = &ImportPackage->ExportTable[i];
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+protected:
+	// Find unused import map entry - there are always exists because IsStore generator
+	// is making import map with same entries as in original cooked files, just replacing
+	// non-object entries with Null.
+	int FindNullImportEntry()
+	{
+		guard(ImportHelper::FindNullImportEntry);
+		for (int Index = NextImportToCheck; Index < ImportCount; Index++)
+		{
+			if (ImportMap[Index].IsNull())
+			{
+				NextImportToCheck = Index + 1;
+				return Index;
+			}
+		}
+		appError("Unable to find Null import entry");
+		unguard;
+	}
+};
+
+void UnPackage::LoadImportTableIoStore(const byte* Data, int ImportCount, const TArray<const CGameFileInfo*>& ImportPackages, CImportTableErrorStats& ErrorStats)
+{
+	guard(UnPackage::LoadImportTableIoStore);
+
+	// Import table is filled with object Ids, we should scan all dependencies to resolve them
+	ImportTable = new FObjectImport[ImportCount];
+	Summary.ImportCount = ImportCount;
+	const FPackageObjectIndex* DataPtr = (FPackageObjectIndex*)Data;
+
+	ImportHelper Helper(ImportPackages, ImportTable, DataPtr, ImportCount);
+
+	for (int ImportIndex = 0; ImportIndex < ImportCount; ImportIndex++)
+	{
+		const FPackageObjectIndex& ObjectIndex = DataPtr[ImportIndex];
+
+		FObjectImport& Imp = ImportTable[ImportIndex];
+		if (ObjectIndex.IsNull())
+			continue;
+
+		if (ObjectIndex.IsScriptImport())
+		{
+			const char* Name = FindScriptEntryName(ObjectIndex);
+			Imp.ObjectName.Str = Name;
+			Imp.ClassName.Str = Name[0] == '/' ? "Package" : "Class";
+			Imp.PackageIndex = 0;
+		}
+		else
+		{
+			assert(ObjectIndex.IsImport());
+			const FObjectExport* Exp = NULL;
+			int PackageIndex = 0;
+			if (Helper.FindObjectInPackages(ObjectIndex, PackageIndex, Exp))
+			{
+#if DEBUG_PACKAGE
+				appPrintf("Imp[%d]: %s %s\n", ImportIndex, *Exp->ObjectName, Exp->ClassName_IO);
+#endif
+				Imp.ObjectName.Str = *Exp->ObjectName;
+				Imp.ClassName.Str = Exp->ClassName_IO;
+				Imp.PackageIndex = - Helper.GetPackageImportIndex(PackageIndex) - 1;
+			}
+			else
+			{
+#if DEBUG_PACKAGE
+				appPrintf("Unable to resolve import %llX\n", ObjectIndex);
+#endif
+				ErrorStats.MissedImports++;
+			}
+		}
+	}
+
+	unguard;
+}
+
+struct ObjectIndexHashEntry
+{
+	ObjectIndexHashEntry* Next;
+	const char* Name;
+	FPackageObjectIndex ObjectIndex;
+};
+
+#define OBJECT_HASH_BITS	12
+#define OBJECT_HASH_MASK	((1 << OBJECT_HASH_BITS)-1)
+
+static ObjectIndexHashEntry* ObjectHashHeads[1 << OBJECT_HASH_BITS];
+static ObjectIndexHashEntry* ObjectHashStore = NULL;
+
+FORCEINLINE int ObjectIndexToHash(const FPackageObjectIndex& ObjectIndex)
+{
+	return uint32(ObjectIndex.Value) >> (32 - OBJECT_HASH_BITS);
+}
+
+const char* FindScriptEntryName(const FPackageObjectIndex& ObjectIndex)
+{
+	int Hash = ObjectIndexToHash(ObjectIndex);
+	for (const ObjectIndexHashEntry* Entry = ObjectHashHeads[Hash]; Entry; Entry = Entry->Next)
+	{
+		if (Entry->ObjectIndex.Value == ObjectIndex.Value)
+		{
+			return Entry->Name;
+		}
+	}
+	return "None";
+}
+
+/*static*/ void UnPackage::LoadGlobalData4(FArchive* NameAr, FArchive* MetaAr, int NameCount)
+{
+	guard(UnPackage::LoadGlobalData4);
+
+	// Load EIoChunkType::LoaderGlobalNames chunk
+	// Similar to UnPackage::LoadNameTableIoStore
+	int NameTableSize = NameAr->GetFileSize();
+	byte* NameBuffer = new byte[NameTableSize];
+	NameAr->Serialize(NameBuffer, NameTableSize);
+	const char** GlobalNameTable = new const char* [NameCount];
+
+	const byte* Data = NameBuffer;
+	const byte* EndPosition = Data + NameTableSize;
+	for (int i = 0; i < NameCount; i++)
+	{
+		FStaticString<MAX_FNAME_LEN> NameStr;
+		SerializeFNameSerializedView(Data, NameStr);
+		GlobalNameTable[i] = appStrdupPool(*NameStr);
+	}
+	assert(Data == EndPosition);
+	delete NameBuffer;
+
+	// Load EIoChunkType::LoaderInitialLoadMeta chunk, it contains "script" objects,
+	// what means to us - names of built-in engine classes.
+	int MetaBufferSize = MetaAr->GetFileSize();
+	byte* MetaBuffer = new byte[MetaBufferSize];
+	MetaAr->Serialize(MetaBuffer, MetaBufferSize);
+
+	TArray<FScriptObjectEntry> ScriptObjects;
+	// First 4 bytes are object count
+	uint32 NumObjects = *(uint32*)MetaBuffer;
+	CopyArrayView(ScriptObjects, MetaBuffer + 4, (MetaBufferSize - 4) / sizeof(FScriptObjectEntry));
+	assert(NumObjects == ScriptObjects.Num());
+	delete MetaBuffer;
+
+	// Build GlobalIndex lookup hash and index to name mapping
+	ObjectHashStore = new ObjectIndexHashEntry[NumObjects];
+	memset(ObjectHashHeads, 0, sizeof(ObjectHashHeads));
+
+	for (int i = 0; i < NumObjects; i++)
+	{
+		const FScriptObjectEntry& E = ScriptObjects[i];
+
+		// Didn't find the code which maps FMinimalName to name table index, but the following
+		// trick works fine:
+		int NameIndex = (E.ObjectName.NameIndex) & 0x7fffffff;
+		const char* ScriptName = GlobalNameTable[NameIndex];
+	#if DEBUG_PACKAGE && 0
+		appPrintf("Script: %s - [%X %X] [%X %X]\n", ScriptName,
+			uint32(E.GlobalIndex.Value >> 62), uint32(E.GlobalIndex.Value & 0xFFFFFFFF),
+			uint32(E.OuterIndex.Value >> 62), uint32(E.OuterIndex.Value & 0xFFFFFFFF));
+		// Example output:
+		// /Script/Engine - [1 DC7C0922] [3 FFFFFFFF] <- first [] used as FScriptObjectEntry::OuterIndex
+		// SkeletalMesh - [1 CFCE1861] [1 DC7C0922] <- first [] referenced by FExportMapEntry::ClassIndex
+	#endif
+
+		ObjectIndexHashEntry& Entry = ObjectHashStore[i];
+		Entry.Name = ScriptName;
+		Entry.ObjectIndex = E.GlobalIndex;
+
+		int Hash = ObjectIndexToHash(E.GlobalIndex);
+		Entry.Next = ObjectHashHeads[Hash];
+		ObjectHashHeads[Hash] = &Entry;
+	}
+
+	delete GlobalNameTable;
 
 	unguard;
 }

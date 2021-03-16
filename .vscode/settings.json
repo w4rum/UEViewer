@@ -47,6 +47,8 @@
 		"unguardf",
 		"unversioned",
 		"recurse",
-		"uv"
+		"uv",
+		"retargeting",
+		"retarget"
 	]
 }

@@ -6,13 +6,38 @@
 class UIUE4AesKeyDialog : public UIBaseDialog
 {
 public:
-	FString Show()
+	bool Show(TArray<FString>& Values)
 	{
-		if (!ShowModal("Please enter AES encryption key", -1, -1))
+		SetResizeable();
+		if (!ShowModal("Please enter AES encryption key", 530, 200))
 			return "";
 
-		// Save typed encryption key
-		return Value;
+		if (Value.IsEmpty())
+		{
+			return false;
+		}
+
+		// Separate multiple AES keys to FString's
+		const char* Begin = &Value[0];
+		int Len = Value.Len() + 1; // include null character for simpler loop below
+		for (int i = 0; i < Len; i++)
+		{
+			const char* s = &Value[i];
+			char c = *s;
+			if (c == '\n' || c == 0)
+			{
+				int len = s - Begin;
+				if (len)
+				{
+					FStaticString<256> Code(len, Begin);
+					Code.TrimStartAndEndInline();
+					if (Code.Len()) Values.Add(Code);
+				}
+				Begin = s + 1;
+			}
+		}
+
+		return true;
 	}
 
 	void InitUI()
@@ -21,6 +46,7 @@ public:
 		[
 			NewControl(UIGroup, GROUP_NO_BORDER|GROUP_HORIZONTAL_LAYOUT)
 			.SetWidth(EncodeWidth(1.0f))
+			.SetHeight(EncodeWidth(1.0f)) // allow vertical resize of contents
 			[
 				NewControl(UIBitmap)
 				.SetWidth(48)
@@ -30,11 +56,13 @@ public:
 				+NewControl(UIGroup, GROUP_NO_BORDER)
 				.SetWidth(EncodeWidth(1.0f))
 				[
-					NewControl(UILabel, "UE Viewer has found an encrypted UE4 pak file. In order to").SetAutoSize()
-					+NewControl(UILabel, "work correctly please specify an AES encryption key which").SetAutoSize()
-					+NewControl(UILabel, "is used for this game.").SetAutoSize()
+					NewControl(UILabel, "UE Viewer has found an encrypted UE4 pak file. In order to work correctly").SetAutoSize()
+					+NewControl(UILabel, "please specify an AES encryption key which is used for this game.").SetAutoSize()
+					+NewControl(UILabel, "Multiple AES keys could be entered, each key on the new line").SetAutoSize()
 					+NewControl(UISpacer)
 					+NewControl(UITextEdit, &Value)
+					.SetHeight(-1)
+					.SetMultiline(true)
 					+NewControl(UISpacer)
 					+NewControl(UIGroup, GROUP_NO_BORDER|GROUP_HORIZONTAL_LAYOUT)
 					[
@@ -42,8 +70,6 @@ public:
 						+NewControl(UIButton, "Ok")
 						.SetWidth(80)
 						.SetOK()
-//						.Enable(false)
-//						.Expose(OkButton)
 						+NewControl(UIButton, "Cancel")
 						.SetWidth(80)
 						.SetCancel()

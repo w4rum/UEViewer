@@ -93,7 +93,9 @@ enum
 	VER_UE4_24 = 518,
 	VER_UE4_25 = 518,
 		VER_UE4_SKINWEIGHT_PROFILE_DATA_LAYOUT_CHANGES = 519,
-	VER_UE4_26 = 519, //?? todo: review later
+		VER_UE4_NON_OUTER_PACKAGE_IMPORT = 520,
+	VER_UE4_26 = 522,
+	VER_UE4_27 = 523, //?? TODO
 	// look for NEW_ENGINE_VERSION over the code to find places where version constants should be inserted.
 	// LATEST_SUPPORTED_UE4_VERSION should be updated too.
 };
@@ -122,7 +124,7 @@ struct FFrameworkObjectVersion
 		// UE4.20, UE4.21 = 34
 		// UE4.22, UE4.23 = 35
 		// UE4.24 = 36
-		// UE4.25 = 37
+		// UE4.25, UE4.26 = 37
 
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
@@ -163,10 +165,10 @@ struct FFrameworkObjectVersion
 			return (Type)35;
 		if (Ar.Game < GAME_UE4(25))
 			return (Type)36;
-		if (Ar.Game < GAME_UE4(26))
+//		if (Ar.Game < GAME_UE4(27))
 			return (Type)37;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -193,6 +195,7 @@ struct FEditorObjectVersion
 		// UE4.23 = 34
 		// UE4.24 = 37
 		// UE4.25 = 38
+		// UE4.26 = 40
 
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
@@ -240,8 +243,10 @@ struct FEditorObjectVersion
 			return (Type)37;
 		if (Ar.Game < GAME_UE4(26))
 			return (Type)38;
+//		if (Ar.Game < GAME_UE4(27))
+			return (Type)40;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -273,6 +278,8 @@ struct FSkeletalMeshCustomVersion
 		SectionIgnoreByReduceAdded = 16,
 		// UE4.23-UE4.25 = 17
 		SkinWeightProfiles = 17, //todo: FSkeletalMeshLODModel::Serialize (editor mesh)
+		// UE4.26 = 18
+		RemoveEnableClothLOD = 18, //todo
 
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
@@ -309,8 +316,10 @@ struct FSkeletalMeshCustomVersion
 			return SectionIgnoreByReduceAdded;
 		if (Ar.Game < GAME_UE4(26))
 			return SkinWeightProfiles;
+//		if (Ar.Game < GAME_UE4(27))
+			return RemoveEnableClothLOD;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -324,7 +333,7 @@ struct FCoreObjectVersion
 		// UE4.15-UE4.21 = 2
 		// UE4.22-UE4.24 = 3
 		SkeletalMaterialEditorDataStripping = 3,
-		// UE4.25 = 4
+		// UE4.25-UE4.26 = 4
 
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
@@ -344,10 +353,10 @@ struct FCoreObjectVersion
 			return (Type)2;
 		if (Ar.Game < GAME_UE4(25))
 			return SkeletalMaterialEditorDataStripping;
-		if (Ar.Game < GAME_UE4(26))
+//		if (Ar.Game < GAME_UE4(27))
 			return (Type)4;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -370,6 +379,7 @@ struct FRenderingObjectVersion
 		// UE4.23 = 31
 		// UE4.24 = 36
 		// UE4.25 = 43
+		// UE4.26 = 44
 		StaticMeshSectionForceOpaqueField = 37,
 
 		VersionPlusOne,
@@ -415,8 +425,10 @@ struct FRenderingObjectVersion
 			return (Type)36;
 		if (Ar.Game < GAME_UE4(26))
 			return (Type)43;
+//		if (Ar.Game < GAME_UE4(27))
+			return (Type)44;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -430,6 +442,7 @@ struct FAnimObjectVersion
 		// UE4.25 = 7
 		IncreaseBoneIndexLimitPerChunk = 4,
 		UnlimitedBoneInfluences = 5,
+		// UE4.26 = 15
 
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
@@ -447,8 +460,11 @@ struct FAnimObjectVersion
 			return StoreMarkerNamesOnSkeleton;
 		if (Ar.Game < GAME_UE4(26))
 			return (Type)7;
+//		if (Ar.Game < GAME_UE4(27))
+			return (Type)15;
+
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -465,7 +481,7 @@ struct FAnimPhysObjectVersion
 		AddLODToCurveMetaData = 12,
 		// UE4.19 = 16
 		ChangeRetargetSourceReferenceToSoftObjectPtr = 15,
-		// UE4.20-UE4.25 = 17
+		// UE4.20-UE4.26 = 17
 
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
@@ -487,10 +503,10 @@ struct FAnimPhysObjectVersion
 			return AddLODToCurveMetaData;
 		if (Ar.Game < GAME_UE4(20))
 			return (Type)16;
-		if (Ar.Game < GAME_UE4(26))
+//		if (Ar.Game < GAME_UE4(27))
 			return (Type)17;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -538,8 +554,10 @@ struct FReleaseObjectVersion
 			return (Type)28;
 		if (Ar.Game < GAME_UE4(26))
 			return (Type)30;
+//		if (Ar.Game < GAME_UE4(27))
+			return (Type)37;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 
@@ -571,10 +589,10 @@ struct FEnterpriseObjectVersion
 			return (Type)6;
 		if (Ar.Game < GAME_UE4(25))
 			return MeshDescriptionBulkDataGuidIsHash;
-		if (Ar.Game < GAME_UE4(26))
+//		if (Ar.Game < GAME_UE4(27))
 			return (Type)10;
 		// NEW_ENGINE_VERSION
-		return LatestVersion;
+//		return LatestVersion;
 	}
 };
 

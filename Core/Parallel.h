@@ -41,6 +41,7 @@ public:
 
 protected:
 
+	bool bInitialized = false;
 #ifdef _WIN32
 	enum { CriticalSectionSize = sizeof(void*)*4 + sizeof(int)*2 }; // sizeof(RTL_CRITICAL_SECTION)
 	char data[CriticalSectionSize];
@@ -75,11 +76,16 @@ protected:
 #endif
 };
 
+// Note: we're using "virtual Run()", which is initialized in derived class. Therefore, CThread creates a
+// suspended thread, which must be manually started after derived class is fully set up using "Start()" method.
 class CThread
 {
 public:
 	CThread();
 	virtual ~CThread();
+
+	// The thread is created suspended to ensure VMT etc are properly set. Use "Start" call to initiate execution.
+	void Start();
 
 	virtual void Run() = 0;
 
@@ -92,13 +98,16 @@ public:
 	static volatile int NumThreads;
 
 protected:
-	static void ThreadFunc(void* param);
-
 #ifdef _WIN32
+	static unsigned __stdcall ThreadFunc(void* param);
+
 	uintptr_t thread;
 #else
+	static void ThreadFunc(void* param);
+
 	enum { ThreadSize = sizeof(size_t) }; // actually: typedef unsigned long int pthread_t
 	size_t thread[ThreadSize / sizeof(size_t)];
+	bool bStarted;
 #endif
 };
 

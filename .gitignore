@@ -50,3 +50,10 @@ cmake-build-debug
 
 umodel
 umodel.exe
+
+# oodle dll
+libs/oo2core*.dll
+Tools/PackageExtract/oo2core*.dll
+
+# PackageExtract - ignore all extracted stuff
+Tools/PackageExtract/**/

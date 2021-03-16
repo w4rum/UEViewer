@@ -1,5 +1,5 @@
 // Simple UI library.
-// Copyright (C) 2020 Konstantin Nosov
+// Copyright (C) 2021 Konstantin Nosov
 // Licensed under the BSD license. See LICENSE.txt file in the project root for full license information.
 
 
@@ -8,7 +8,7 @@
 #define FIRST_DIALOG_ID				4000
 #define FIRST_MENU_ID				8000
 
-#define DEFAULT_MARGIN				4
+#define DEFAULT_MARGIN				6
 
 #define VERTICAL_SPACING			DEFAULT_MARGIN
 #define HORIZONTAL_SPACING			(DEFAULT_MARGIN*2)

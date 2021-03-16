@@ -1037,7 +1037,7 @@ void CTypeInfo::ReadUnrealProperty(FArchive& Ar, FPropertyTag& Tag, void* Object
 		if (!Prop || !Prop->TypeName)	// Prop->TypeName==NULL when declared with PROP_DROP() macro
 		{
 			if (!Prop)
-				appPrintf("WARNING: %s \"%s::%s\" was not found\n", TypeName, Name, *Tag.Name);
+				appPrintf("WARNING: %s \"%s::%s\" was not found\n", DbgTypeName, Name, *Tag.Name);
 #if DEBUG_PROPS
 		appPrintf("  (skipping %s)\n", *Tag.Name);
 #endif
@@ -1324,8 +1324,19 @@ void CTypeInfo::ReadUnrealProperty(FArchive& Ar, FPropertyTag& Tag, void* Object
 		break;
 
 	case NAME_MapProperty:
-		appError("Map property not implemented");
-		break;
+		// appError("Map property not implemented");
+        for (int i = 0; i < 5; i++) {
+            byte ignore;
+            Ar << ignore;
+        }
+        {
+            FString package;
+            FString key;
+            Ar << package;
+            Ar << key;
+            Ar << PROP(FString);
+        }
+        break;
 
 	case NAME_FixedArrayProperty:
 		appError("FixedArray property not implemented");

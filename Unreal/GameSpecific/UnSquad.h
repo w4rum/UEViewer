@@ -24,7 +24,7 @@ struct TAASLanes
     BEGIN_PROP_TABLE
 		PROP_STRING(LaneName)
 		PROP_STRUC(LaneNodesColor, FLinearColor)
-		PROP_ARRAY(AASLaneLinks, Link)
+		PROP_ARRAY(AASLaneLinks, "Link")
 	END_PROP_TABLE
 #endif // DECLARE_VIEWER_PROPS
 };
@@ -81,7 +81,7 @@ public:
 
 #if DECLARE_VIEWER_PROPS
     BEGIN_PROP_TABLE
-		PROP_ARRAY(DesignOutgoingLinks, Link)
+		PROP_ARRAY(DesignOutgoingLinks, "Link")
 	END_PROP_TABLE
 #endif // DECLARE_VIEWER_PROPS
 };
@@ -93,7 +93,7 @@ class USQRAASLaneInitializer_C : public USQGraphRAASInitializerComponent
 #if DECLARE_VIEWER_PROPS
     DECLARE_CLASS(USQRAASLaneInitializer_C, USQGraphRAASInitializerComponent)
 	BEGIN_PROP_TABLE
-		PROP_ARRAY(AASLanes, TAASLanes)
+		PROP_ARRAY(AASLanes, "TAASLanes")
 	END_PROP_TABLE
 #endif // DECLARE_VIEWER_PROPS
 };

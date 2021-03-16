@@ -190,7 +190,7 @@ void EndExport(bool profile)
 
 	if (profile)
 	{
-		assert(ctx.startTime);
+//		assert(ctx.startTime);
 		unsigned long elapsedTime = appMilliseconds() - ctx.startTime;
 		appPrintf("Exported %d/%d objects in %.1f sec\n", ctx.Objects.Num() - ctx.NumSkippedObjects, ctx.Objects.Num(), elapsedTime / 1000.0f);
 	}

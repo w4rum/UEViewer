@@ -35,7 +35,7 @@ struct CVec3
 	union
 	{
 		float v[3];
-		struct { float x, y, z; };
+		struct { float X, Y, Z; };
 	};
 	// access to data
 	inline float& operator[](int index)
@@ -259,11 +259,11 @@ extern const CCoords identCoords;
 
 struct CQuat
 {
-	float	x, y, z, w;
+	float	X, Y, Z, W;
 
 	inline void Set(float _x, float _y, float _z, float _w)
 	{
-		x = _x; y = _y; z = _z; w = _w;
+		X = _x; Y = _y; Z = _z; W = _w;
 	}
 
 	void FromAxis(const CAxis &src);
@@ -277,16 +277,16 @@ struct CQuat
 
 	inline void Conjugate()
 	{
-		FNegate(x);
-		FNegate(y);
-		FNegate(z);
+		FNegate(X);
+		FNegate(Y);
+		FNegate(Z);
 	}
 	inline void Negate()
 	{
-		FNegate(x);
-		FNegate(y);
-		FNegate(z);
-		FNegate(w);
+		FNegate(X);
+		FNegate(Y);
+		FNegate(Z);
+		FNegate(W);
 	}
 	void Normalize();
 	void Mul(const CQuat &Q);

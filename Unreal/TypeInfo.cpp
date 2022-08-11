@@ -406,7 +406,6 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 				PROCESS(int,      "%d", PROP(int));
 				PROCESS(bool,     "%s", PROP(bool) ? "true" : "false");
 				PROCESS(float,    "%.12f", PROP(float));
-#if 1
 				if (IS(UObject*))
 				{
 					UObject *obj = PROP(UObject*);
@@ -443,9 +442,6 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
 						PD2->PrintValue("None");
 					}
 				}
-#else
-				PROCESS(UObject*, "%s", PROP(UObject*) ? PROP(UObject*)->Name : "Null");
-#endif
 				PROCESS(FName,    "%s", *PROP(FName));
 				PROCESS(FString,  "\"%s\"", *PROP(FString));
 				if (Prop->TypeName[0] == '#')

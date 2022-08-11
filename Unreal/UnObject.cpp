@@ -1210,6 +1210,7 @@ void CTypeInfo::ReadUnrealProperty(FArchive& Ar, FPropertyTag& Tag, void* Object
 				if (!ItemType)
 				{
 					appPrintf("WARNING: structure type %s is unknown, skipping array %s::%s\n", Prop->TypeName, Name, Prop->Name);
+					Ar.Seek(StopPos);
 				}
 				else if (DataCount)
 				{
@@ -1541,7 +1542,7 @@ void CTypeInfo::SerializeBatmanProps(FArchive& Ar, void* ObjectData) const
 
 		case NAME_VectorProperty:
 			Ar << PROP(FVector);
-			PROP_DBG("%g %g %g", FVECTOR_ARG(PROP(FVector)));
+			PROP_DBG("%g %g %g", VECTOR_ARG(PROP(FVector)));
 			break;
 
 		case NAME_RotatorProperty:
@@ -1730,7 +1731,7 @@ void CTypeInfo::SerializeUnversionedProperties4(FArchive& Ar, void* ObjectData) 
 		appPrintf("Prop: %d (zeroed=%d)\n", PropIndex, bIsZeroedProp);
 	#endif
 		int ArrayIndex = 0;
-		const char* PropName = FindUnversionedProp(PropIndex, ArrayIndex);
+		const char* PropName = FindUnversionedProp(PropIndex, ArrayIndex, Ar.Game);
 	#if DEBUG_PROPS
 		DUMP_ARC_BYTES(Ar, 32, "-> ...");
 	#endif
@@ -1950,7 +1951,7 @@ void CTypeInfo::SerializeUnversionedProperties4(FArchive& Ar, void* ObjectData) 
 		else if (COMPARE_TYPE(Prop->TypeName, PropType::FVector))
 		{
 			Ar << PROP(FVector);
-			PROP_DBG("%g %g %g", FVECTOR_ARG(PROP(FVector)));
+			PROP_DBG("%g %g %g", VECTOR_ARG(PROP(FVector)));
 		}
 		else if (COMPARE_TYPE(Prop->TypeName, "FLinearColor"))
 		{

@@ -142,7 +142,7 @@ after_textures:
 	Ar << MeshScale << MeshOrigin << RotOrigin;
 
 #if DEBUG_SKELMESH
-	appPrintf("Scale: %g %g %g\nOrigin: %g %g %g\nRotation: %d %d %d\n", FVECTOR_ARG(MeshScale), FVECTOR_ARG(MeshOrigin), FROTATOR_ARG(RotOrigin));
+	appPrintf("Scale: %g %g %g\nOrigin: %g %g %g\nRotation: %d %d %d\n", VECTOR_ARG(MeshScale), VECTOR_ARG(MeshOrigin), FROTATOR_ARG(RotOrigin));
 #endif
 
 	if (Version <= 1 || Ar.Game == GAME_SplinterCell)
@@ -522,8 +522,8 @@ void USkeletalMesh::Serialize(FArchive &Ar)
 	if ((Ar.Game == GAME_Tribes3 || Ar.Game == GAME_Swat4) && t3_hdrSV >= 3)
 	{
 	#if 0
-		// it looks like format of following data was chenged sinse
-		// data was prepared, and game executeble does not load these
+		// it looks like format of following data was changed since
+		// data was prepared, and game executable does not load these
 		// LazyArrays (otherwise error should occur) -- so we are
 		// simply skipping these arrays
 		TLazyArray<FT3Unk1>    unk1;
@@ -798,6 +798,9 @@ skeleton:
 		Dst->ParentIndex = B.ParentIndex;
 		Dst->Position    = CVT(B.BonePos.Position);
 		Dst->Orientation = CVT(B.BonePos.Orientation);
+#if !BAKE_BONE_SCALES
+		Dst->Scale.Set(1, 1, 1);
+#endif
 	}
 	unguard; // ProcessSkeleton
 
@@ -1824,7 +1827,7 @@ void UStaticMesh::SerializeVanguardMesh(FArchive &Ar)
 
 	Ar << BoundingBox;
 #if DEBUG_STATICMESH
-	appPrintf("Bounds: %g %g %g - %g %g %g (%d)\n", FVECTOR_ARG(BoundingBox.Min), FVECTOR_ARG(BoundingBox.Max), BoundingBox.IsValid);
+	appPrintf("Bounds: %g %g %g - %g %g %g (%d)\n", VECTOR_ARG(BoundingBox.Min), VECTOR_ARG(BoundingBox.Max), BoundingBox.IsValid);
 #endif
 
 	Ar << Sections;

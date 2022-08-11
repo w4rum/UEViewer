@@ -135,6 +135,7 @@ BEGIN_CLASS_TABLE
 END_CLASS_TABLE
 #endif // UNREAL3
 	SuppressUnknownClass("UBodySetup");
+	SuppressUnknownClass("UMaterialExpression*"); // wildcard
 }
 
 
@@ -476,8 +477,8 @@ static void PrintUsage()
 static void PrintVersionInfo()
 {
 	appPrintf(
-			"UE Viewer (UModel)\n" "%s\n" "%s\n" "%s\n",
-			GBuildString, GCopyrightString, GUmodelHomepage
+			"UE Viewer (UModel)\n" "%s\n" "%s\n" "%s\n%s\n",
+			GBuildString, GCopyrightString, GLicenseString, GUmodelHomepage
 	);
 }
 

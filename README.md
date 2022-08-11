@@ -62,7 +62,7 @@ alternative it is possible to create a batch file which will temporarily modify 
 Here's an example of such file:
 
     @echo off
-    set C:\BuildTools\bin;PATH=%PATH%
+    set PATH=C:\BuildTools\bin;%PATH%
     bash build.sh
 
 To launch a build process without a batch, simply execute
@@ -70,7 +70,7 @@ To launch a build process without a batch, simply execute
     bash build.sh
 
 ### Windows 64-bit
-Despite we're providing only 32-but builds of UE Viewer, it is possible to compile it for 64-bit platform. To do that, you
+Despite only 32-bit builds of UE Viewer being provided, it is possible to compile it for 64-bit platform. To do that, you
 should change a variable in *build.sh*: *PLATFORM* should be changed from `vc-win32` to `vc-win64`. Also 64-bit build could
 be initiated with launching
 
@@ -106,7 +106,7 @@ Using IDE
 As UE Viewer is using custom cross-platform build system, there's no MSBuild support. However we have a simple Visual Studio
 project which allows to use this IDE to edit, compile, run and debug the project. Project files are located in `.vs` directory.
 In order to open the project, you should start Visual Studio, use "Open a local folder" command, and then choose root project's
-directory. Please note: there's .sln file somewhere in *Tools* folder, don't use it - it is intended for UI framewwork testing.
+directory. Please note: there's .sln file somewhere in *Tools* folder, don't use it - it is intended for UI framework testing.
 
 Please note that you should use Visual Studio 2019 or newer, otherwise [some features will not work](https://www.gildor.org/smf/index.php/topic,7419.0.html).
 
@@ -230,6 +230,4 @@ Below is the list of major folders which exists in this repository or which are 
 
 License
 -------
-The code is not covered with any existing license yet, however I'm thinking about adding BSD 3-clause license. I just probably
-need help from some people who knows about that more than I (and I don't like the idea of adding license boilerplate into all
-source code files).
+UE Viewer is licensed under the MIT License, see [LICENSE.txt](https://github.com/gildor2/UEViewer/blob/master/LICENSE.txt) for more information.

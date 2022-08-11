@@ -1,9 +1,14 @@
 UE Viewer
-(c) Konstantin Nosov (Gildor), 2007-2021
+(c) Konstantin Nosov (Gildor), 2007-2022
 
 
 Please support the development by making a donation here:
 https://www.gildor.org/en/donate
+
+
+License
+~~~~~~~
+UE Viewer is licensed under the MIT License.
 
 
 System requirements
@@ -187,7 +192,7 @@ LZO data compression library
 
 libmspack - a library for Microsoft compression formats
   (c) Stuart Caie
-  http://www.cabextract.org.uk/libmspack/
+  https://github.com/kyz/libmspack
 
 LZ4
   (c) Yann Collet
@@ -209,13 +214,31 @@ detex
   (c) Harm Hanemaaijer
   https://github.com/hglm/detex
 
-ooz
-  (c) Powzix
-  https://github.com/powzix/ooz
+Oodle
+  (c) Epic Games
+  http://www.radgametools.com/oodle.htm
 
 
 Changes
 ~~~~~~~
+06.01.2022
+- UE4.25-Plus support; use -game=ue4.25+ or select the engine in startup UI
+
+05.09.2021
+- UE4.27 support
+
+05.07.2021
+- providing Win32 and Win64 builds of UE Viewer
+
+30.05.2021
+- Mass Effect Legendary Edition support
+
+29.05.2021
+- replaced ooz library with oodle SDK shipped with UE4.27 source code
+
+06.04.2021
+- added UE4 SkeletalMesh socket support
+
 18.02.2021
 - added support for playing back animations with negative rates (playing in opposite direction)
 
@@ -1802,7 +1825,7 @@ Changes
 - implemented support for loading XBox360 packages
 
 25.02.2009
-- implemented support for UE3 AnimSet (all compresion algorithms are supported except
+- implemented support for UE3 AnimSet (all compression algorithms are supported except
   ACF_Float32NoW)
 
 23.02.2009
@@ -1816,7 +1839,7 @@ Changes
 - significantly improved mesh rendering speed
 
 17.02.2009
-- writting uc-script when exporting SkeletalMesh
+- writing uc-script when exporting SkeletalMesh
 
 16.02.2009
 - implemented Mirror's Edge SkeletalMesh support

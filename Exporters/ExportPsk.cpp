@@ -306,6 +306,22 @@ static void ExportExtraUV
 	unguard;
 }
 
+static void CopyBoneName(char* Dst, int DstLen, const char* Src)
+{
+	int NameLength = strlen(Src);
+	if (NameLength < DstLen)
+	{
+		strcpy(Dst, Src);
+	}
+	else
+	{
+		int Middle = (DstLen - 4) / 2;
+		memcpy(Dst, Src, Middle);
+		memcpy(Dst + Middle, "____", 4);
+		memcpy(Dst + Middle + 4, Src + NameLength - Middle + 1, Middle); // +1 for keeping null terminating character
+		appPrintf("WARNING: bone name \"%s\" is too long, renamed to \"%s\"\n", Src, Dst);
+	}
+}
 
 static void ExportSkeletalMeshLod(const CSkeletalMesh &Mesh, const CSkelMeshLod &Lod, FArchive &Ar)
 {
@@ -361,7 +377,7 @@ static void ExportSkeletalMeshLod(const CSkeletalMesh &Mesh, const CSkelMeshLod 
 		VBone B;
 		memset(&B, 0, sizeof(B));
 		const CSkelMeshBone &S = Mesh.RefSkeleton[i];
-		strcpy(B.Name, S.Name);
+		CopyBoneName(B.Name, sizeof(B.Name), *S.Name);
 		// count NumChildren
 		int NumChildren = 0;
 		for (j = 0; j < numBones; j++)
@@ -465,7 +481,7 @@ void ExportPsk(const CSkeletalMesh *Mesh)
 		else
 			appSprintf(ARRAY_ARG(filename), "%s_Lod%d.%s", OriginalMesh->Name, Lod, Ext);
 
-		FArchive *Ar = CreateExportArchive(OriginalMesh, 0, "%s", filename);
+		FArchive *Ar = CreateExportArchive(OriginalMesh, EFileArchiveOptions::Default, "%s", filename);
 		if (Ar)
 		{
 			ExportSkeletalMeshLod(*Mesh, MeshLod, *Ar);
@@ -483,7 +499,7 @@ void ExportPsk(const CSkeletalMesh *Mesh)
 	// export script file
 	if (GExportScripts)
 	{
-		FArchive *Ar = CreateExportArchive(OriginalMesh, FAO_TextFile, "%s.uc", OriginalMesh->Name);
+		FArchive *Ar = CreateExportArchive(OriginalMesh, EFileArchiveOptions::TextFile, "%s.uc", OriginalMesh->Name);
 		if (Ar)
 		{
 			ExportScript(Mesh, *Ar);
@@ -493,7 +509,7 @@ void ExportPsk(const CSkeletalMesh *Mesh)
 
 	if (OriginalMesh->GetTypeinfo()->NumProps)
 	{
-		FArchive* PropAr = CreateExportArchive(OriginalMesh, FAO_TextFile, "%s.props.txt", OriginalMesh->Name);
+		FArchive* PropAr = CreateExportArchive(OriginalMesh, EFileArchiveOptions::TextFile, "%s.props.txt", OriginalMesh->Name);
 		if (PropAr)
 		{
 			OriginalMesh->GetTypeinfo()->SaveProps(OriginalMesh, *PropAr);
@@ -540,7 +556,7 @@ static void DoExportPsa(const CAnimSet* Anim, const UObject* OriginalAnim)
 {
 	guard(DoExportPsa);
 
-	FArchive* Ar0 = CreateExportArchive(OriginalAnim, 0, "%s.psa", OriginalAnim->Name);
+	FArchive* Ar0 = CreateExportArchive(OriginalAnim, EFileArchiveOptions::Default, "%s.psa", OriginalAnim->Name);
 	if (!Ar0) return;
 	FArchive &Ar = *Ar0;						// use "Ar << obj" instead of "(*Ar) << obj"
 
@@ -561,8 +577,7 @@ static void DoExportPsa(const CAnimSet* Anim, const UObject* OriginalAnim)
 	{
 		FNamedBoneBinary B;
 		memset(&B, 0, sizeof(B));
-		assert(strlen(*Anim->TrackBoneNames[i]) < sizeof(B.Name));
-		strcpy(B.Name, *Anim->TrackBoneNames[i]);
+		CopyBoneName(B.Name, sizeof(B.Name), *Anim->TrackBoneNames[i]);
 		B.Flags       = 0;						// reserved
 		B.NumChildren = 0;						// unknown here
 		B.ParentIndex = (i > 0) ? 0 : -1;		// unknown for UAnimSet
@@ -695,7 +710,7 @@ static void DoExportPsa(const CAnimSet* Anim, const UObject* OriginalAnim)
 	FArchive *Ar1 = NULL;
 	if (bSaveConfig)
 	{
-		Ar1 = CreateExportArchive(OriginalAnim, FAO_TextFile, "%s.config", OriginalAnim->Name);
+		Ar1 = CreateExportArchive(OriginalAnim, EFileArchiveOptions::TextFile, "%s.config", OriginalAnim->Name);
 	}
 
 	if (Ar1)
@@ -756,7 +771,7 @@ static void DoExportPsa(const CAnimSet* Anim, const UObject* OriginalAnim)
 	//todo: .props.txt is not saved when multiple animations are stored in a single .psa file
 	if (OriginalAnim->GetTypeinfo()->NumProps)
 	{
-		FArchive* PropAr = CreateExportArchive(OriginalAnim, FAO_TextFile, "%s.props.txt", OriginalAnim->Name);
+		FArchive* PropAr = CreateExportArchive(OriginalAnim, EFileArchiveOptions::TextFile, "%s.props.txt", OriginalAnim->Name);
 		if (PropAr)
 		{
 			OriginalAnim->GetTypeinfo()->SaveProps(OriginalAnim, *PropAr);
@@ -898,7 +913,7 @@ void ExportStaticMesh(const CStaticMesh *Mesh)
 		else
 			appSprintf(ARRAY_ARG(filename), "%s_Lod%d.pskx", OriginalMesh->Name, Lod);
 
-		FArchive *Ar = CreateExportArchive(OriginalMesh, 0, "%s", filename);
+		FArchive *Ar = CreateExportArchive(OriginalMesh, EFileArchiveOptions::Default, "%s", filename);
 		if (Ar)
 		{
 			ExportStaticMeshLod(Mesh->Lods[Lod], *Ar);
@@ -915,7 +930,7 @@ void ExportStaticMesh(const CStaticMesh *Mesh)
 
 	if (OriginalMesh->GetTypeinfo()->NumProps)
 	{
-		FArchive* PropAr = CreateExportArchive(OriginalMesh, FAO_TextFile, "%s.props.txt", OriginalMesh->Name);
+		FArchive* PropAr = CreateExportArchive(OriginalMesh, EFileArchiveOptions::TextFile, "%s.props.txt", OriginalMesh->Name);
 		if (PropAr)
 		{
 			OriginalMesh->GetTypeinfo()->SaveProps(OriginalMesh, *PropAr);

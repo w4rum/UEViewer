@@ -17,7 +17,7 @@
 //?? TODO: remove this function
 static CVec3 GetMaterialDebugColor(int Index)
 {
-	// most of this code is targetted to make maximal color combinations
+	// most of this code is targeted to make maximal color combinations
 	// which are maximally different for adjacent BoneIndex values
 	static const float table[]  = { 0.9f, 0.3f, 0.6f, 1.0f };
 	static const int  table2[] = { 0, 1, 2, 4, 7, 3, 5, 6 };
@@ -69,8 +69,8 @@ inline void TransformDirection(CVec3& vec)
 
 inline void TransformRotation(CQuat& q)
 {
-	Exchange(q.y, q.z);		// same logic as for vector
-//??	q.w *= -1;				// changing left-handed to right-handed, so inverse rotation - works correctly without this line
+	Exchange(q.Y, q.Z);		// same logic as for vector
+//??	q.W *= -1;				// changing left-handed to right-handed, so inverse rotation - works correctly without this line
 }
 
 struct BufferData
@@ -338,7 +338,7 @@ static void ExportSection(GLTFExportContext& Context, const CBaseMeshLod& Lod, c
 			appError("%X -> %g\n", V.Normal.Data, Normal.w);
 		}
 	#endif
-		Tangent.w = (Normal.w < 0) ? -1 : 1;
+		Tangent.W = (Normal.W < 0) ? -1 : 1;
 
 		TransformPosition(Position);
 		TransformDirection(Normal);
@@ -349,7 +349,7 @@ static void ExportSection(GLTFExportContext& Context, const CBaseMeshLod& Lod, c
 
 		// Fill buffers
 		PositionBuf.Put(Position);
-		NormalBuf.Put(Normal.xyz);
+		NormalBuf.Put(Normal.XYZ);
 		TangentBuf.Put(Tangent);
 		UVBuf[0]->Put(V.UV);
 	}
@@ -550,10 +550,10 @@ static void ExportSkinData(GLTFExportContext& Context, const CSkelMeshLod& Lod, 
 			"      \"translation\" : [ %g, %g, %g ],\n"
 			"      \"rotation\" : [ %g, %g, %g, %g ]\n",
 			bonePos[0], bonePos[1], bonePos[2],
-			boneRot.x, boneRot.y, boneRot.z, boneRot.w
+			boneRot.X, boneRot.Y, boneRot.Z, boneRot.W
 		);
 
-		boneRot.w *= -1;
+		boneRot.W *= -1;
 
 		CCoords& BC = BoneCoords[boneIndex];
 		BC.origin = bonePos;
@@ -738,7 +738,8 @@ static void ExportAnimations(GLTFExportContext& Context, FArchive& Ar)
 			BufferData& TimeBuf = Context.Data[TimeBufIndex];
 			TimeBuf.Setup(NumKeys, "SCALAR", BufferData::FLOAT, sizeof(float));
 
-			float RateScale = 1.0f / Seq.Rate;
+			// Compute RateScale. Take care of null Rate - this might be valid if animation has just 1 frame (pose)
+			float RateScale = (Seq.Rate > 0.001f) ? 1.0f / Seq.Rate : 1.0f;
 			float LastFrameTime = 0;
 			if (TimeArray->Num() == 0 || NumKeys == 1)
 			{
@@ -1011,14 +1012,14 @@ void ExportSkeletalMeshGLTF(const CSkeletalMesh* Mesh)
 		char meshName[256];
 		appSprintf(ARRAY_ARG(meshName), "%s%s", OriginalMesh->Name, suffix);
 
-		FArchive* Ar = CreateExportArchive(OriginalMesh, FAO_TextFile, "%s.gltf", meshName);
+		FArchive* Ar = CreateExportArchive(OriginalMesh, EFileArchiveOptions::TextFile, "%s.gltf", meshName);
 		if (Ar)
 		{
 			GLTFExportContext Context;
 			Context.MeshName = meshName;
 			Context.SkelMesh = Mesh;
 
-			FArchive* Ar2 = CreateExportArchive(OriginalMesh, 0, "%s.bin", meshName);
+			FArchive* Ar2 = CreateExportArchive(OriginalMesh, EFileArchiveOptions::Default, "%s.bin", meshName);
 			assert(Ar2);
 			ExportMeshLod(Context, Mesh->Lods[Lod], Mesh->Lods[Lod].Verts, *Ar, *Ar2);
 			delete Ar;
@@ -1053,14 +1054,14 @@ void ExportStaticMeshGLTF(const CStaticMesh* Mesh)
 		char meshName[256];
 		appSprintf(ARRAY_ARG(meshName), "%s%s", OriginalMesh->Name, suffix);
 
-		FArchive* Ar = CreateExportArchive(OriginalMesh, FAO_TextFile, "%s.gltf", meshName);
+		FArchive* Ar = CreateExportArchive(OriginalMesh, EFileArchiveOptions::TextFile, "%s.gltf", meshName);
 		if (Ar)
 		{
 			GLTFExportContext Context;
 			Context.MeshName = meshName;
 			Context.StatMesh = Mesh;
 
-			FArchive* Ar2 = CreateExportArchive(OriginalMesh, 0, "%s.bin", meshName);
+			FArchive* Ar2 = CreateExportArchive(OriginalMesh, EFileArchiveOptions::Default, "%s.bin", meshName);
 			assert(Ar2);
 			ExportMeshLod(Context, Mesh->Lods[Lod], Mesh->Lods[Lod].Verts, *Ar, *Ar2);
 			delete Ar;

@@ -1039,6 +1039,11 @@ UObject* UnPackage::CreateExport(int index)
 	Obj->Outer        = NULL;
 	Obj->Name         = Exp.ObjectName;
 
+    if (strcmp(Obj->GetClassName(), "CatchAll") == 0) {
+        appPrintf("Missing class \"%s\" for object \"%s\"\n", ClassName, Obj->Name);
+    }
+
+
 	bool bLoad = true;
 	if (GBeforeLoadObjectCallback)
 		bLoad = GBeforeLoadObjectCallback(Obj);

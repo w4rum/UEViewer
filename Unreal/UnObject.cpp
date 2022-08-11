@@ -186,10 +186,22 @@ void UObject::EndLoad()
 			appPrintProfiler();
 #endif
 			// check for unread bytes
-			if (!Package->IsStopper())
-				appError("%s::Serialize(%s): %d unread bytes",
-					Obj->GetClassName(), Obj->Name,
-					Package->GetStopper() - Package->Tell());
+            // (instead of aborting, just print it to console)
+			if (!Package->IsStopper()) {
+                appPrintf("WARNING: %s (%s): %d unread bytes\n",
+                         Obj->GetClassName(), Obj->Name,
+                         Package->GetStopper() - Package->Tell());
+#if DEBUG_PROPS
+                uint64 leftover = Package->GetStopper() - Package->Tell();
+                appPrintf("### UNREAD BYTES:\n");
+                for (int i = 0; i < leftover; i++) {
+                    char tmp;
+                    *Package << tmp;
+                    appPrintf("%c", tmp);
+                }
+                appPrintf("\n### UNREAD BYTES END\n");
+#endif
+            }
 			LoadedObjects.Add(Obj);
 
 #if UNREAL4

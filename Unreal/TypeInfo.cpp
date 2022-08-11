@@ -83,6 +83,17 @@ void SuppressUnknownClass(const char* ClassNameWildcard)
 	GSuppressedClasses[GSuppressedClassCount++] = ClassNameWildcard;
 }
 
+// catch-all class to force objects to be created in order to print better debug output
+class UCatchAll: public UObject
+{
+DECLARE_CLASS(UCatchAll, UObject)
+public:
+
+#if DECLARE_VIEWER_PROPS
+    BEGIN_PROP_TABLE
+	END_PROP_TABLE
+#endif // DECLARE_VIEWER_PROPS
+};
 
 // todo: 'ClassType' probably should be dropped
 const CTypeInfo* FindClassType(const char* Name, bool ClassType)
@@ -115,7 +126,7 @@ const CTypeInfo* FindClassType(const char* Name, bool ClassType)
 #if DEBUG_TYPES
 	appPrintf("failed!\n");
 #endif
-	return NULL;
+	return UCatchAll::StaticGetTypeinfo();
 	unguardf("%s", Name);
 }
 

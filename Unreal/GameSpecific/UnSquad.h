@@ -408,6 +408,36 @@ public:
 #endif // DECLARE_VIEWER_PROPS
 };
 
+class UStaticMeshComponent: public UComponent
+{
+    DECLARE_CLASS(UStaticMeshComponent, UComponent)
+public:
+    UObject *RootComponent;
+    FVector RelativeLocation;
+
+#if DECLARE_VIEWER_PROPS
+    BEGIN_PROP_TABLE
+		PROP_OBJ(RootComponent)
+		PROP_VECTOR(RelativeLocation)
+	END_PROP_TABLE
+#endif // DECLARE_VIEWER_PROPS
+};
+
+class UStaticMeshActor: public UComponent
+{
+    DECLARE_CLASS(UStaticMeshActor, UComponent)
+public:
+    UObject *RootComponent;
+    UStaticMeshComponent *StaticMeshComponent;
+
+#if DECLARE_VIEWER_PROPS
+    BEGIN_PROP_TABLE
+		PROP_OBJ(RootComponent)
+		PROP_OBJ(StaticMeshComponent)
+	END_PROP_TABLE
+#endif // DECLARE_VIEWER_PROPS
+};
+
 #define REGISTER_SQUAD_CLASSES \
     REGISTER_CLASS(Link) \
     REGISTER_CLASS(TAASLanes) \
@@ -435,6 +465,8 @@ public:
     REGISTER_CLASS(UModel) \
     REGISTER_CLASS(USQWorldSettings) \
     REGISTER_CLASS(USQCoreStateComponent) \
-    REGISTER_CLASS(UTargetPoint)
+    REGISTER_CLASS(UTargetPoint) \
+    REGISTER_CLASS(UStaticMeshActor) \
+    REGISTER_CLASS(UStaticMeshComponent)
 
 #endif //UEVIEWER_UNSQUAD_H

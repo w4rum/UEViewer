@@ -432,17 +432,24 @@ static void CollectProps(const CTypeInfo *Type, const void *Data, CPropDump &Dum
                         }
 						//PD2->PrintValue("%s'%s'", obj->GetClassName(), ObjName);
                         const CTypeInfo *ClassType = FindClassType(obj->GetClassName());
-                        CPropDump *PDobj = new (PD->Nested) CPropDump;
+                        CPropDump *PDobj = new (PD2->Nested) CPropDump;
                         PDobj->PrintName("%s", ObjName, OuterObjName);
 
-                        CPropDump *PDclass = new (PD->Nested) CPropDump;
-                        PDclass->PrintName("ClassName");
-                        PDclass->PrintValue("%s", obj->GetClassName());
+                        // prevent deep nesting and 500 MiB yaml files for HLP lattice graph
+                        // (clusters reference each other)
+                        if (strcmp(Prop->Name, "NextClusters") == 0) {
+                            PDobj->PrintValue("Details ommitted");
+                        } else {
+                            CPropDump *PDclass = new (PDobj->Nested) CPropDump;
+                            PDclass->PrintName("ClassName");
+                            PDclass->PrintValue("%s", obj->GetClassName());
 
-                        CPropDump *PDobjOuter = new (PDobj->Nested) CPropDump;
-                        PDobjOuter->PrintName("OuterName");
-                        PDobjOuter->PrintValue("%s", OuterObjName);
-						CollectProps(ClassType, obj, *PDobj);
+                            CPropDump *PDobjOuter = new (PDobj->Nested) CPropDump;
+                            PDobjOuter->PrintName("OuterName");
+                            PDobjOuter->PrintValue("%s", OuterObjName);
+
+                            CollectProps(ClassType, obj, *PDobj);
+                        }
 					}
 					else
 					{

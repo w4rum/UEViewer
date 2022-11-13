@@ -440,6 +440,73 @@ public:
 #endif // DECLARE_VIEWER_PROPS
 };
 
+///////////////////////////////
+// Hawk's Layer Pack classes
+///////////////////////////////
+
+struct NextCluster;
+
+class UHLP_BP_CaptureZoneClusterLattice_C : public UActor
+{
+    UObject *SQGraphNode;
+    TArray<UObject*> NextClusters;
+
+#if DECLARE_VIEWER_PROPS
+    DECLARE_CLASS(UHLP_BP_CaptureZoneClusterLattice_C, UActor)
+	BEGIN_PROP_TABLE
+		PROP_OBJ(SQGraphNode)
+		PROP_ARRAY(NextClusters, "UObject*")
+	END_PROP_TABLE
+#endif // DECLARE_VIEWER_PROPS
+};
+
+struct SQDesignAASGraphNode {
+    FString CaptureTier;
+    FLinearColor TierColour;
+    TArray<UObject*> PossibleClusters;
+
+#if DECLARE_VIEWER_PROPS
+    DECLARE_STRUCT(SQDesignAASGraphNode)
+	BEGIN_PROP_TABLE
+        PROP_STRING(CaptureTier)
+		PROP_STRUC(TierColour, FLinearColor)
+		PROP_ARRAY(PossibleClusters, "UObject*")
+	END_PROP_TABLE
+#endif // DECLARE_VIEWER_PROPS
+};
+
+class USQRAASGridInitializer_C : public UObject
+{
+    UBP_CaptureZone_C *Team1Main;
+    UBP_CaptureZone_C *Team2Main;
+    TArray<SQDesignAASGraphNode> AASGrids;
+
+#if DECLARE_VIEWER_PROPS
+    DECLARE_CLASS(USQRAASGridInitializer_C, UObject)
+	BEGIN_PROP_TABLE
+		PROP_OBJ(Team1Main)
+		PROP_OBJ(Team2Main)
+		PROP_ARRAY(AASGrids, "SQDesignAASGraphNode")
+	END_PROP_TABLE
+#endif // DECLARE_VIEWER_PROPS
+};
+
+class UHLP_SQRAASLatticeInitializer_C: public UObject
+{
+    UObject *Team1Main;
+    UObject *Team2Main;
+    TArray<UObject*> FirstClusters;
+#if DECLARE_VIEWER_PROPS
+    DECLARE_CLASS(UHLP_SQRAASLatticeInitializer_C, UObject)
+	BEGIN_PROP_TABLE
+		PROP_OBJ(Team1Main)
+		PROP_OBJ(Team2Main)
+		PROP_ARRAY(FirstClusters, "UObject*")
+	END_PROP_TABLE
+#endif // DECLARE_VIEWER_PROPS
+};
+
+
 #define REGISTER_SQUAD_CLASSES \
     REGISTER_CLASS(Link) \
     REGISTER_CLASS(TAASLanes) \
@@ -469,6 +536,10 @@ public:
     REGISTER_CLASS(USQCoreStateComponent) \
     REGISTER_CLASS(UTargetPoint) \
     REGISTER_CLASS(UStaticMeshActor) \
-    REGISTER_CLASS(UStaticMeshComponent)
+    REGISTER_CLASS(UStaticMeshComponent)  \
+    REGISTER_CLASS(SQDesignAASGraphNode) \
+    REGISTER_CLASS(UHLP_BP_CaptureZoneClusterLattice_C) \
+    REGISTER_CLASS(USQRAASGridInitializer_C) \
+    REGISTER_CLASS(UHLP_SQRAASLatticeInitializer_C)
 
 #endif //UEVIEWER_UNSQUAD_H

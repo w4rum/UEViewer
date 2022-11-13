@@ -1213,9 +1213,9 @@ public:
 
 	BEGIN_PROP_TABLE
 		PROP_OBJ(Parent)
-		PROP_ARRAY(ScalarParameterValues,  "FScalarParameterValue" )
-		PROP_ARRAY(TextureParameterValues, "FTextureParameterValue")
-		PROP_ARRAY(VectorParameterValues,  "FVectorParameterValue" )
+//		PROP_ARRAY(ScalarParameterValues,  "FScalarParameterValue" )
+//		PROP_ARRAY(TextureParameterValues, "FTextureParameterValue")
+//		PROP_ARRAY(VectorParameterValues,  "FVectorParameterValue" )
 		PROP_DROP(FontParameterValues)
 #if UNREAL4
 		PROP_STRUC(BasePropertyOverrides, FMaterialInstanceBasePropertyOverrides)

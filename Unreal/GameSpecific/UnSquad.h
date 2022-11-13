@@ -62,12 +62,14 @@ public:
     FVector RelativeLocation;
     FRotator RelativeRotation;
     FVector RelativeScale3D;
+    bool bAbsoluteLocation;
 
 #if DECLARE_VIEWER_PROPS
     BEGIN_PROP_TABLE
 		PROP_VECTOR(RelativeLocation)
 		PROP_ROTATOR(RelativeRotation)
 		PROP_VECTOR(RelativeScale3D) // TODO: might be wrong, is 0.0 when it should be 1.0
+        PROP_BOOL(bAbsoluteLocation)
 
 	END_PROP_TABLE
 #endif // DECLARE_VIEWER_PROPS
